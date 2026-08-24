@@ -1,0 +1,19 @@
+{
+  "name": "qwen3.8-guide",
+  "version": "1.0.0",
+  "description": "Qwen 3.8-27B architecture from first principles — a static, dependency-free explainer site with 36 interactive widgets.",
+  "type": "module",
+  "scripts": {
+    "test": "node test-site.mjs",
+    "serve": "python3 -m http.server 8137"
+  },
+  "keywords": [
+    "qwen",
+    "gated-deltanet",
+    "linear-attention",
+    "multi-token-prediction",
+    "deep-learning"
+  ],
+  "license": "MIT",
+  "private": true
+}

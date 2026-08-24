@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen 3.8-27B — The Architecture, From Scratch</title>
+<meta name="description" content="A ground-up engineering walkthrough of Qwen 3.8-27B: hybrid Gated DeltaNet + Gated Attention backbone, vision front-end, MTP, data pipeline, three-stage pretraining, four-stage post-training, and inference optimizations.">
+<meta name="theme-color" content="#f3ede0">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23f3ede0'/%3E%3Crect x='11' y='13' width='10' height='38' rx='5' fill='%23b8341f'/%3E%3Crect x='27' y='21' width='10' height='30' rx='5' fill='%231d6e6b'/%3E%3Crect x='43' y='29' width='10' height='22' rx='5' fill='%232b3a8a'/%3E%3C/svg%3E">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Qwen 3.8-27B — Reference">
+<meta property="og:title" content="Qwen 3.8-27B — The Architecture, From Scratch">
+<meta property="og:description" content="Every component derived from first principles: the hybrid DeltaNet+GQA backbone, MRoPE vision front-end, MTP self-speculation, training curriculum, and the inference math that makes 262k context servable.">
+<meta property="og:image" content="og-image.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Title card for the Qwen 3.8-27B architecture reference: three stacked color bars beside the heading “Qwen 3.8-27B — the architecture, from scratch.” and a spec line listing layers, context, and license.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400..700;1,400..700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/styles.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk" crossorigin="anonymous"></script>
+</head>
+<body id="top">
+<a class="skip-link" href="#main">Skip to content ↓</a>
+<div class="progress" id="progress"></div>
+<button class="totop" id="totop" type="button" aria-label="Back to top" title="Back to top ↑">
+  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 14l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</button>
+
+<nav class="topnav" aria-label="Section navigation">
+  <div class="topnav-inner">
+    <div class="nav-brand"><span class="nb-name">Qwen 3.8-27B</span><span class="nb-tag">Reference</span></div>
+    <div class="nav-right">
+      <span class="nav-current" id="navCurrent" aria-hidden="true"></span>
+      <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="navPanel">
+        Contents
+        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="nav-panel" id="navPanel">
+    <div class="nav-grid" id="navLinks">
+      <a href="#orientation" data-num="01" data-label="Orientation"><span class="n">01</span>Orientation</a>
+      <a href="#tokenizer" data-num="02" data-label="Tokenizer"><span class="n">02</span>Tokenizer</a>
+      <a href="#backbone" data-num="03" data-label="Backbone"><span class="n">03</span>Hybrid backbone</a>
+      <a href="#deltanet" data-num="04" data-label="DeltaNet"><span class="n">04</span>Gated DeltaNet</a>
+      <a href="#attention" data-num="05" data-label="Attention"><span class="n">05</span>Gated Attention</a>
+      <a href="#ffn" data-num="06" data-label="FFN"><span class="n">06</span>FFN &amp; residual stream</a>
+      <a href="#vision" data-num="07" data-label="Vision"><span class="n">07</span>Vision front-end</a>
+      <a href="#mtp" data-num="08" data-label="MTP"><span class="n">08</span>Multi-Token Prediction</a>
+      <a href="#data" data-num="09" data-label="Data"><span class="n">09</span>Data pipeline</a>
+      <a href="#pretraining" data-num="10" data-label="Pretraining"><span class="n">10</span>Pretraining</a>
+      <a href="#posttraining" data-num="11" data-label="Post-Training"><span class="n">11</span>Post-training</a>
+      <a href="#optimizations" data-num="12" data-label="Optimizations"><span class="n">12</span>Inference optimizations</a>
+      <a href="#benchmarks" data-num="13" data-label="Benchmarks"><span class="n">13</span>Benchmarks</a>
+      <a href="#pseudocode" data-num="14" data-label="Code"><span class="n">14</span>From scratch, as code</a>
+      <a href="#takeaways" data-num="15" data-label="Synthesis"><span class="n">15</span>Synthesis</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero wrap">
+  <div class="hero-telemetry" aria-label="Architecture telemetry and rapid subsystem passport">
+    <div class="telemetry-lead">
+      <span class="telemetry-beacon" aria-hidden="true"></span>
+      <span class="telemetry-title">Hybrid Recurrent Core</span>
+      <span class="telemetry-divider" aria-hidden="true">/</span>
+      <span class="telemetry-badge">64L Dense</span>
+    </div>
+
+    <div class="telemetry-stream" aria-label="Hybrid attention stream rhythm: 3 DeltaNet linear recurrent layers to 1 Gated Attention layer">
+      <svg viewBox="0 0 160 22" class="telemetry-wave" aria-hidden="true">
+        <path d="M0,11 Q10,4 20,11 T40,11 T60,11 L60,3 L60,19 L60,11 Q70,4 80,11 T100,11 T120,11 L120,3 L120,19 L120,11 Q130,4 140,11 T160,11" fill="none" stroke="currentColor" stroke-width="1.3" class="wave-track"/>
+        <circle cx="60" cy="3" r="2.5" class="wave-node attn"/>
+        <circle cx="60" cy="19" r="2.5" class="wave-node attn"/>
+        <circle cx="120" cy="3" r="2.5" class="wave-node attn"/>
+        <circle cx="120" cy="19" r="2.5" class="wave-node attn"/>
+      </svg>
+      <span class="telemetry-wave-label">3Δ : 1A stream</span>
+    </div>
+
+    <div class="telemetry-chips">
+      <a href="#deltanet" class="t-chip" title="Explore Gated DeltaNet linear attention (48 layers)"><span class="t-k">Δ-net</span><span class="t-v">48L · O(1) state</span></a>
+      <a href="#attention" class="t-chip" title="Explore Gated Attention & 3D MRoPE (16 layers)"><span class="t-k">GQA</span><span class="t-v">16L · 24Q/4KV</span></a>
+      <a href="#mtp" class="t-chip" title="Explore Multi-Token Prediction speculative engine"><span class="t-k">MTP</span><span class="t-v">3-draft</span></a>
+      <a href="#pseudocode" class="t-chip highlight" title="Jump to §14 From scratch, 342-line PyTorch reference"><span class="t-k">Code</span><span class="t-v">§14 PyTorch →</span></a>
+    </div>
+  </div>
+
+  <h1>Qwen 3.8-27B<br><span class="grad">the architecture, from scratch.</span></h1>
+  <p class="hero-sub">An implementation-level reference for Alibaba's 27-billion-parameter hybrid vision-language model: the attention mathematics, tokenizer, data pipeline, training curriculum, and inference optimizations — each derived from the published config and implemented in full.</p>
+
+  <div class="spec-band" aria-label="Document and model specification">
+    <div class="band-head">
+      <div class="kicker" aria-label="64-layer hybrid architecture: 16 super-blocks of three Gated DeltaNet layers and one Gated Attention layer. Apache 2.0, August 2026.">
+        <span class="bits" id="heroBits" aria-hidden="true"></span>
+        <span class="bits-label">16 × <b>[ Δ Δ Δ A ]</b> <i>·</i> apache-2.0 <i>·</i> aug 2026</span>
+      </div>
+      <div class="meta-strip" aria-label="Page meta">
+      <span><b>15</b> sections</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span><b>~120 min</b> read</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span><b>31</b> widgets</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span><b>16</b> equations</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span><b>342</b>-line PyTorch §14</span>
+      </div>
+    </div>
+
+    <dl class="spec-grid">
+      <div class="spec-cell hot">
+        <dt>Parameters</dt>
+        <dd><span class="sv" id="statParams">27.58B</span><span class="sn">dense — every parameter active on every token</span></dd>
+      </div>
+      <div class="spec-cell">
+        <dt>Layers</dt>
+        <dd><span class="sv">64</span><span class="sn">48 linear-attention + 16 full-attention layers, 3:1</span></dd>
+      </div>
+      <div class="spec-cell">
+        <dt>Native context</dt>
+        <dd><span class="sv">262k</span><span class="sn">extensible to 1M tokens via YaRN (Yet another RoPE extensioN)</span></dd>
+      </div>
+      <div class="spec-cell">
+        <dt>Vocabulary</dt>
+        <dd><span class="sv">248,320</span><span class="sn">padded BPE · 55.2 GB of BF16 weights</span></dd>
+      </div>
+    </dl>
+  </div>
+  <p style="font-size:12.5px;color:var(--faint)">Specs sourced from the official model card <code><a href="https://huggingface.co/Qwen/Qwen3.8-27B" rel="noopener" target="_blank">Qwen/Qwen3.8-27B</a></code> (Aug 14, 2026) and the Qwen3.8 release notes. Training-pipeline details follow the Qwen3 technical report methodology (<a href="https://arxiv.org/abs/2505.09388" rel="noopener" target="_blank">arXiv:2505.09388</a>), the most recent published recipe — the 3.8 report has not been released.</p>
+</header>
+
+<main class="wrap" id="main">
+
+<!-- ============================================================ 01 ORIENTATION -->
+<section id="orientation">
+  <div class="sec-tag">01 · Orientation</div>
+  <h2>System overview</h2>
+  <p class="lead">Qwen 3.8-27B is a decoder-only transformer with four departures from the textbook design — a hybrid attention backbone, multimodal rotary position encoding, trained-in multi-token prediction, and a native vision front-end. The remainder of this document derives each departure and the engineering decisions it implies.</p>
+
+  <h3>The three pressures that shape the architecture</h3>
+  <p>Every constant in this model is a response to three simultaneous pressures, and holding them in mind makes the rest of the document legible. The first is <strong>long context</strong>: the model must attend over 262k tokens natively and stretch to 1M, which makes the attention key-value cache the dominant cost — a 262k-token softmax layer holds an $O(T)$ cache that, multiplied across 64 layers, would alone consume tens of gigabytes of VRAM per active request. The second is <strong>multimodality</strong>: image and video tokens must enter the same residual stream as text without a separate decoder or a retrained position embedding, so that one set of layers handles every modality. The third is <strong>serving economics</strong>: at 27B parameters the model is sized to fit a single 80 GB device, so every constant — head counts, FFN width, KV precision, the ratio of linear to full-attention layers — is tuned against a fixed memory ceiling rather than against quality alone.</p>
+  <p>The central tension is that softmax attention is the only component with perfect recall but the only component whose memory grows with sequence length. Linear attention and state-space models collapse the per-token cost to a constant by writing each token into a fixed-size recurrent state, but that compression is lossy: a needle buried in a 200k-token haystack is not guaranteed to survive the write. Qwen 3.8 resolves the tension not by choosing a side but by <em>interleaving</em> the two regimes — compressing the bulk of the sequence with linear layers and periodically re-reading the raw context with a full-attention layer. The architecture is, in this sense, a schedule for when to remember exactly and when to remember approximately.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 880 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Full model dataflow diagram">
+      <defs>
+        <linearGradient id="gAmber" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="rgba(184,52,31,0.22)"/>
+          <stop offset="1" stop-color="rgba(184,52,31,0.06)"/>
+        </linearGradient>
+        <linearGradient id="gMint" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="rgba(29,110,107,0.22)"/>
+          <stop offset="1" stop-color="rgba(29,110,107,0.06)"/>
+        </linearGradient>
+        <linearGradient id="gSky" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="rgba(168,106,23,0.22)"/>
+          <stop offset="1" stop-color="rgba(168,106,23,0.06)"/>
+        </linearGradient>
+        <linearGradient id="gIris" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="rgba(43,58,138,0.22)"/>
+          <stop offset="1" stop-color="rgba(43,58,138,0.06)"/>
+        </linearGradient>
+        <marker id="arwG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5a5046"/>
+        </marker>
+        <marker id="arwA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#b8341f"/>
+        </marker>
+      </defs>
+
+      <!-- =============== COL 1: INPUTS =============== -->
+      <!-- Vision Encoder -->
+      <rect x="30" y="40" width="210" height="120" rx="10" fill="url(#gMint)" stroke="rgba(29,110,107,0.6)" stroke-width="1.2"/>
+      <text x="135" y="66" text-anchor="middle" class="dg-title" fill="#1d6e6b">Vision Encoder</text>
+      <line x1="60" y1="76" x2="210" y2="76" stroke="rgba(29,110,107,0.25)"/>
+      <text x="135" y="96" text-anchor="middle" class="dg-label">SigLIP-style ViT</text>
+      <text x="135" y="114" text-anchor="middle" class="dg-label">images · video frames</text>
+      <text x="135" y="132" text-anchor="middle" class="dg-label">→ patch embeddings</text>
+      <text x="135" y="150" text-anchor="middle" class="dg-sub">~333 weight tensors · 0.9B params</text>
+
+      <!-- Text tokens -->
+      <rect x="30" y="220" width="210" height="90" rx="10" class="dg-box"/>
+      <text x="135" y="246" text-anchor="middle" class="dg-title">Text tokens</text>
+      <line x1="60" y1="256" x2="210" y2="256" stroke="rgba(255,255,255,0.08)"/>
+      <text x="135" y="276" text-anchor="middle" class="dg-label">BPE · vocab 248,320</text>
+      <text x="135" y="294" text-anchor="middle" class="dg-label">id ∈ [0, 248,320)</text>
+
+      <!-- =============== COL 2: MERGE =============== -->
+      <!-- Projector + Merge -->
+      <rect x="290" y="105" width="180" height="80" rx="10" fill="url(#gSky)" stroke="rgba(168,106,23,0.6)" stroke-width="1.2"/>
+      <text x="380" y="129" text-anchor="middle" class="dg-title" fill="#a86a17">Projector + 2×2 Merge</text>
+      <line x1="320" y1="139" x2="440" y2="139" stroke="rgba(168,106,23,0.25)"/>
+      <text x="380" y="159" text-anchor="middle" class="dg-label">vision feats → d = 5120</text>
+      <text x="380" y="175" text-anchor="middle" class="dg-sub">4× token reduction</text>
+
+      <!-- Token Embedding -->
+      <rect x="290" y="220" width="180" height="80" rx="10" class="dg-box"/>
+      <text x="380" y="246" text-anchor="middle" class="dg-title">Token Embedding</text>
+      <line x1="320" y1="256" x2="440" y2="256" stroke="rgba(255,255,255,0.08)"/>
+      <text x="380" y="294" text-anchor="middle" class="dg-sub">2.54 GB in BF16</text>
+
+      <!-- =============== COL 3: UNIFIED STREAM =============== -->
+      <rect x="520" y="100" width="140" height="220" rx="10" class="dg-box" stroke="rgba(255,255,255,0.22)" stroke-width="1.2"/>
+      <text x="590" y="126" text-anchor="middle" class="dg-title">Unified stream</text>
+      <line x1="545" y1="136" x2="635" y2="136" stroke="rgba(255,255,255,0.1)"/>
+      <text x="590" y="158" text-anchor="middle" class="dg-label">x ∈ ℝ^(T × 5120)</text>
+      <text x="590" y="180" text-anchor="middle" class="dg-label">text + vision</text>
+      <text x="590" y="198" text-anchor="middle" class="dg-label">tokens, one</text>
+      <text x="590" y="216" text-anchor="middle" class="dg-label">residual</text>
+      <text x="590" y="234" text-anchor="middle" class="dg-label">sequence</text>
+      <line x1="545" y1="252" x2="635" y2="252" stroke="rgba(255,255,255,0.06)"/>
+      <text x="590" y="272" text-anchor="middle" class="dg-sub">all paths converge</text>
+      <text x="590" y="290" text-anchor="middle" class="dg-sub">into a single bus</text>
+
+      <!-- =============== COL 4: HYBRID STACK =============== -->
+      <rect x="710" y="30" width="140" height="380" rx="10" fill="url(#gAmber)" stroke="rgba(184,52,31,0.6)" stroke-width="1.4"/>
+      <text x="780" y="56" text-anchor="middle" class="dg-title" fill="#b8341f">64 layers</text>
+      <line x1="735" y1="66" x2="825" y2="66" stroke="rgba(184,52,31,0.3)"/>
+      <text x="780" y="90" text-anchor="middle" class="dg-label">16 × [ Δ Δ Δ A ]</text>
+
+      <text x="780" y="120" text-anchor="middle" class="dg-label" fill="#b8341f">Δ Gated DeltaNet</text>
+      <text x="780" y="136" text-anchor="middle" class="dg-sub">(48 layers, linear)</text>
+
+      <text x="780" y="166" text-anchor="middle" class="dg-label" fill="#1d6e6b">A Gated Attention</text>
+      <text x="780" y="182" text-anchor="middle" class="dg-sub">(16 layers, full SDPA)</text>
+
+      <line x1="735" y1="200" x2="825" y2="200" stroke="rgba(255,255,255,0.08)"/>
+
+      <text x="780" y="222" text-anchor="middle" class="dg-sub">each layer:</text>
+      <text x="780" y="240" text-anchor="middle" class="dg-sub">attn → RMSNorm</text>
+      <text x="780" y="258" text-anchor="middle" class="dg-sub">→ SwiGLU FFN</text>
+      <text x="780" y="276" text-anchor="middle" class="dg-sub">+ residuals</text>
+
+      <line x1="735" y1="294" x2="825" y2="294" stroke="rgba(255,255,255,0.08)"/>
+
+      <text x="780" y="316" text-anchor="middle" class="dg-sub">MRoPE on the</text>
+      <text x="780" y="332" text-anchor="middle" class="dg-sub">16 full layers</text>
+      <text x="780" y="354" text-anchor="middle" class="dg-sub">recurrent state in</text>
+      <text x="780" y="370" text-anchor="middle" class="dg-sub">the 48 linear layers</text>
+
+      <!-- =============== ARROWS =============== -->
+      <!-- vision → projector -->
+      <line x1="240" y1="100" x2="290" y2="135" class="dg-flow" marker-end="url(#arwG)"/>
+      <!-- text → embedding -->
+      <line x1="240" y1="265" x2="290" y2="260" class="dg-flow" marker-end="url(#arwG)"/>
+      <!-- projector → unified -->
+      <line x1="470" y1="140" x2="520" y2="170" class="dg-flow" marker-end="url(#arwG)"/>
+      <!-- embedding → unified -->
+      <line x1="470" y1="260" x2="520" y2="240" class="dg-flow" marker-end="url(#arwG)"/>
+      <!-- unified → stack (main backbone) -->
+      <line x1="660" y1="210" x2="710" y2="210" class="dg-flow" marker-end="url(#arwA)"/>
+      <!-- stack → LM head (return path) -->
+      <path d="M 780 410 Q 780 440 590 440 L 590 320" class="dg-flow" marker-end="url(#arwA)" fill="none"/>
+
+      <!-- =============== LM HEAD =============== -->
+      <rect x="520" y="340" width="140" height="80" rx="10" fill="url(#gIris)" stroke="rgba(43,58,138,0.6)" stroke-width="1.2"/>
+      <text x="590" y="364" text-anchor="middle" class="dg-title" fill="#2b3a8a">LM head</text>
+      <line x1="545" y1="374" x2="635" y2="374" stroke="rgba(43,58,138,0.3)"/>
+      <text x="590" y="392" text-anchor="middle" class="dg-label">→ logits (248,320)</text>
+      <text x="590" y="408" text-anchor="middle" class="dg-sub">+ MTP heads</text>
+    </svg>
+    <div class="fig-cap"><b>Fig. 1</b> — Full dataflow: two input modalities merge into one residual stream, pass through the 64-layer hybrid stack, and exit through a 248,320-way LM head with auxiliary MTP heads.</div>
+  </div>
+
+  <h3>Reading the dataflow, stage by stage</h3>
+  <p>The diagram reads left to right as a convergence into a single bus and then a vertical stack. Two input paths enter on the left: a <strong>SigLIP-style vision encoder</strong> that turns images and video frames into patch embeddings (~0.9B parameters, §07), and a <strong>text tokenizer</strong> that maps raw bytes to integer IDs in a 248,320-symbol vocabulary (§02). The vision path is narrower in the diagram but heavier per token — a single image can cost thousands of tokens — so before merging it passes through a <strong>projector and 2×2 spatial merge</strong> that folds each 2×2 block of patches into one token, a 4× reduction that trades spatial resolution for sequence length. Text needs no such reduction; it is already discrete.</p>
+  <p>Both paths converge into the <strong>unified stream</strong>, a single tensor $x \in \mathbb{R}^{T \times 5120}$ carrying text and vision tokens on equal footing. From here on, no layer distinguishes a text token from an image token: the modality boundary lives only in the position encoding (MRoPE, §07) and the embedding path, never in the backbone. The stream enters the <strong>64-layer hybrid stack</strong> — the amber column — arranged as 16 repetitions of $[3 \times \text{DeltaNet} + 1 \times \text{Attention}]$. The stack's output returns to an <strong>LM head</strong> that projects the final hidden state back to a 248,320-way distribution over the vocabulary, plus auxiliary <strong>MTP heads</strong> that predict several tokens ahead for self-speculative decoding (§08).</p>
+
+  <h3>The residual stream as the central bus</h3>
+  <p>The single most important structural fact about this model is that every layer is <em>additive</em> into one residual stream. A layer does not overwrite its input; it computes a correction and adds it. This is what makes the architecture composable: each of the 64 layers is a small residual function whose output is summed back into the bus, so the hidden state at layer $l$ is the input plus the accumulated contributions of every preceding layer. The norm-before-residual convention (Pre-RMSNorm) means each layer normalizes a <em>copy</em> of the stream for its own computation but writes its un-normalized update back, so the stream's magnitude grows steadily rather than exploding.</p>
+  <div class="math" aria-label="Pre-RMSNorm residual update: each layer normalizes the stream for its mixer and its FFN, then adds the raw outputs back into the un-normalized residual bus.">
+    \mathbf{x}_{l+1} = \mathbf{x}_l \;+\; \text{Mixer}_l\!\big(\text{RMSNorm}(\mathbf{x}_l)\big) \;+\; \text{FFN}_l\!\big(\text{RMSNorm}(\mathbf{x}_l)\big)
+  </div>
+  <p>Two consequences follow and recur throughout the document. First, the mixer (DeltaNet or attention) and the FFN each read a normalized view of the same stream but contribute independent updates, so they specialize: the mixer routes information <em>across positions</em> while the FFN transforms the representation <em>at a single position</em>. Second, because the stream is never reset, the model's effective depth is the full 64-layer sum — a token's final representation is its embedding plus a layered set of corrections, and removing or reordering layers changes the sum. This is why the 3:1 schedule (§03) is not cosmetic: the order in which approximate and exact memory layers are stacked changes what the stream converges to.</p>
+
+  <p>The four departures from the textbook transformer, each of which gets its own section:</p>
+  <ul>
+    <li><strong>1. A hybrid attention backbone</strong> — 64 layers arranged as 16 identical super-blocks of <code>[3 × (Gated DeltaNet + FFN)] + [1 × (Gated Attention + FFN)]</code>. 75% of layers use <em>linear attention</em> with a constant-size recurrent state, so their per-token cost does not grow with context; 25% use full softmax attention, whose KV cache grows with sequence length but which guarantees exact retrieval. The two are not interchangeable: the linear layers compress the stream cheaply and the full-attention layers periodically re-anchor it against the raw context, preventing the associative drift that a pure linear stack accumulates. This is the single most important design decision in the model (§03–05).</li>
+    <li><strong>2. Interleaved multimodal RoPE (MRoPE)</strong> — rotary position encoding normally assigns each token a single 1D position, which breaks for images that have a 2D layout and video that has a 2D+time layout. MRoPE splits the rotary phases into three sections (<code>mrope_section: [11, 11, 10]</code>) that carry the temporal, height, and width axes independently, so a 2D image grid or a video timeline slots into the same 1D token sequence as text without retraining tricks or separate position tables (§07).</li>
+    <li><strong>3. Trained-in Multi-Token Prediction</strong> — the model ships with extra heads that predict several tokens ahead in one forward pass. At inference these heads act as a <em>draft model that is the same model</em>: the backbone proposes multiple continuations, verifies them in a single pass, and accepts the longest prefix that checks out, amortizing the per-token cost of long autoregressive generation. Because the heads were trained jointly with the backbone rather than distilled afterward, their predictions share the backbone's distribution and reject rarely (§08).</li>
+    <li><strong>4. A native vision front-end</strong> — a SigLIP-style vision tower turns images and video frames into patch embeddings, which a projector then maps into the LM's 5120-wide residual stream. The backbone therefore never sees "vision" as a special case: image tokens are tokens, processed by the same 64 layers as text, which is why the model can interleave reasoning over figures and prose without a separate vision decoder. This is a first-class input path, not a bolt-on adapter (§07).</li>
+  </ul>
+
+  <div class="callout why">
+    <div class="co-title">Scope</div>
+    <p>Most treatments stop at "a transformer with linear attention." That phrase conceals the engineering decisions: why <em>delta-rule</em> linear attention rather than a plain SSM, why 3:1 rather than 7:1, why the full-attention layers carry 4 KV heads rather than 24, why the FFN is 17,408 wide rather than 20,480. Each constant is a trade — memory against quality, throughput against retrieval precision — and each is derived in the section noted.</p>
+  </div>
+
+  <h3>Parameter budget</h3>
+  <p>Before reading a single equation, account for where the 27 billion parameters actually live. The audit below is computed live from the config; every number in §03–06 derives from this breakdown.</p>
+  <p>The budget breaks into three tiers of very different size. The <strong>per-layer FFN</strong> is the largest single sink: a 17,408-wide SwiGLU has three projections over the 5120-wide hidden state (§06), costing roughly 269M parameters per layer and, across 64 layers, the majority of the model — FFN width is the primary lever on per-token capacity. The <strong>mixer</strong> (DeltaNet or Gated Attention projections, §04–05) is surprisingly small by comparison, because attention parameters scale with head dimension and head count rather than with sequence length, and the linear layers reuse a fixed recurrent state instead of growing a projection. The <strong>vocabulary</strong> is the third tier and the most top-heavy single object: the embedding matrix alone is 2.54 GB in BF16, and with an untied LM head the input and output boundaries each carry that cost, so they outweigh any single backbone layer. Toggle the vision tower (~0.9B) and the MTP module (~1.3B) below to see how much the auxiliary paths add on top of the dense core.</p>
+  <div class="widget" id="w-param">
+    <div class="w-head"><span class="w-title">Parameter accounting audit</span><span class="w-tag">live widget</span></div>
+    <div class="w-desc">Computed from the official config: hidden d=5120, 64 layers, FFN 17,408, vocab 248,320 (padded), DeltaNet heads 16QK/48V×128, GQA 24Q/4KV×256, vision tower ≈0.9B. Toggle components to see what each subsystem costs.</div>
+    <div class="w-controls">
+      <div class="w-ctl"><label id="lblVis">include vision tower</label>
+        <div class="seg" id="paramVisionSeg" role="group" aria-labelledby="lblVis"><button data-v="1" class="on" aria-pressed="true">yes</button><button data-v="0" aria-pressed="false">no</button></div>
+      </div>
+      <div class="w-ctl"><label id="lblMtp">include MTP module</label>
+        <div class="seg" id="paramMtpSeg" role="group" aria-labelledby="lblMtp"><button data-v="1" class="on" aria-pressed="true">yes</button><button data-v="0" aria-pressed="false">no</button></div>
+      </div>
+    </div>
+    <div class="w-out" id="paramOut" aria-live="polite"></div>
+  </div>
+</section>
+
+<!-- ============================================================ 02 TOKENIZER -->
+<section id="tokenizer">
+  <div class="sec-tag">02 · Tokenizer &amp; the input contract</div>
+  <h2>From raw Unicode bytes to 248,320-dimensional discrete spaces</h2>
+  <p class="lead">Everything downstream in the 64-layer backbone consumes a discrete sequence of integer token IDs $\mathbf{x} \in [0, 248320)^{T}$. The byte-level BPE tokenizer defines the model's vocabulary contract, compressed sequence length, and structured protocol format across 119 languages.</p>
+
+  <h3>Byte-level BPE, from the bottom up</h3>
+  <p>Byte-pair encoding builds the vocabulary bottom-up rather than assigning one token per word. The algorithm starts from the smallest possible alphabet — raw UTF-8 bytes, 256 symbols — and scans the training corpus for the most frequent adjacent pair of symbols, merges that pair into a single new token, adds it to the vocabulary, and repeats. Each iteration shrinks the corpus by one merge and grows the vocabulary by one token; after roughly 248,064 merges the vocabulary reaches its working size. Because the base alphabet is bytes, every possible Unicode string is representable — there is no <code>&lt;unk&gt;</code> token and no out-of-vocabulary fallback, which is what lets one tokenizer serve 119 languages, source code, and mathematical notation simultaneously.</p>
+  <p>The merge sequence is fixed at training time and baked into the tokenizer file, so the same string always segments identically at inference. Two consequences matter for the rest of the architecture. First, the tokenizer — not the model — decides the sequence length $T$ for a given input, so its compression rate directly sets the attention FLOPs and KV cache the backbone must pay. Second, the vocabulary size fixes the dimension of the embedding lookup and the final LM-head projection, two of the largest single tensors in the model.</p>
+
+  <!-- BPE Mathematical Foundations & GEMM Alignment Formalism -->
+  <div class="math" aria-label="Equation 1: BPE merge rule expanding 248,064 merges into a 248,320-token vocabulary padded to 3,880 by 64 for tensor-core alignment, yielding a 2.54 GB BF16 embedding matrix and 1.27 billion MACs per token.">
+    \tau^* = \arg\max_{(u, v) \in V \times V} \text{Freq}(u, v) \quad \implies \quad V_{k+1} = V_k \cup \{ u \circ v \} \quad \text{for } k = 1 \dots 248,064&nbsp;&nbsp;<span class="eq-no">(1)</span><br>
+    |V_{\text{padded}}| = 248,320 = 3,880 \times 64 \quad (\text{Exact NVIDIA Tensor Core MMA Tile Alignment})<br>
+    \text{Embedding Matrix} = W_{\text{emb}} \in \mathbb{R}^{248320 \times 5120} \implies 248,320 \times 5,120 \times 2\text{ bytes} = \mathbf{2.54\text{ GB (BF16)}}<br>
+    \text{LM Head Logits} = \mathbf{z} = \mathbf{h}_L W_{\text{head}}^T \in \mathbb{R}^{B \times T \times 248320} \implies \mathbf{1.27\text{ Billion MACs / Token}}
+  </div>
+
+  <h3>Why 248,320 and not 248,064: padding for the Tensor Core</h3>
+  <p>The merge schedule produces 248,064 learned tokens, but the vocabulary is declared as 248,320 — a padded size chosen as $3{,}880 \times 64$. The 256 extra rows are never used as tokens; they exist so the vocabulary dimension is an exact multiple of the Tensor Core matrix-multiply-accumulate (MMA) tile. The embedding lookup and the LM-head projection are GEMMs with the vocabulary as their contracting dimension, and on modern NVIDIA Tensor Cores a matmul only hits peak throughput when that dimension is a clean multiple of the tile (64 for BF16) — a partial tail forces either masked lanes or a separate epilogue, both of which waste bandwidth on a tensor this large. Padding costs 256 unused rows (~2.6 MB of BF16) and buys peak embedding and head throughput on every forward pass, so the trade is overwhelmingly in favor of padding.</p>
+  <p>The embedding matrix $W_{\text{emb}} \in \mathbb{R}^{248320 \times 5120}$ is the model's only bridge from discrete integers to continuous geometry: each token ID selects one row, and that 5120-vector is the initial residual-stream value before any layer runs. The LM head is its mirror — a projection from the 5120-wide residual stream back to a 248,320-way distribution — and in Qwen 3.8 it is <em>untied</em>, a separate learned matrix rather than the transposed embedding. Input and output boundaries are therefore symmetric and together hold roughly 5 GB of BF16, more than any single backbone layer. The widget below shows the segmentation that feeds this lookup.</p>
+
+  <!-- Widget 1: Live Interactive Tokenizer & BPE Segmenter (#w-tokenizer-lab) -->
+  <div class="widget" id="w-tokenizer-lab">
+    <div class="w-head"><span class="w-title">Interactive BPE token segmenter &amp; fertility inspector</span><span class="w-tag">live tokenizer</span></div>
+    <div class="w-desc">Token segmentation for preset and custom inputs across modalities: tokenization badges, live integer IDs, and character-to-token fertility compression under the 248,320-token vocabulary.</div>
+    
+    <div class="calc-ctl">
+      <div class="w-ctl" style="flex:1">
+        <label for="tokPresetSel">modality / language test preset</label>
+        <select id="tokPresetSel">
+          <option value="code" selected>Python Code: Def &amp; Matrix Multiplication</option>
+          <option value="math">Reasoning Prompt: &lt;think&gt; Let S_t = α·S_{t-1} &lt;/think&gt;</option>
+          <option value="multilingual">Multilingual Text: English · 中文 · हिन्दी · العربية</option>
+          <option value="agent">Agentic Tool Call: &lt;|tool_call_start|&gt; { "tool": "search" } &lt;|tool_call_end|&gt;</option>
+          <option value="lowresource">Low-Resource Script: ภาษาไทย · தமிழ் · ភាសាខ្មែរ</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="tokLiveTokens" aria-live="polite" style="margin-top:var(--s-3)"></div>
+  </div>
+
+  <h3>Fertility: why vocabulary size is a serving lever</h3>
+  <p>Fertility is the number of tokens a tokenizer emits per word, and it is the single number that ties the tokenizer to the backbone's cost. Sequence length $T$ enters attention as $O(T^2)$ compute and the KV cache as $O(T)$ memory, so a script that tokenizes at 2.5 tokens/word rather than 1.3 does not merely use more tokens — it multiplies attention FLOPs by roughly $2.5^2 / 1.3^2 \approx 3.7$ and the KV cache by $2.5 / 1.3 \approx 1.9$. A small vocabulary forces high fertility on non-Latin scripts because their graphemes cannot share merges with Latin text; a large vocabulary dedicates merge budget to those scripts and compresses them toward Latin rates.</p>
+  <p>This is the economic argument for the 32k → 151k → 248k vocabulary progression across Qwen generations. Each step costs a larger embedding and LM-head tensor but buys lower fertility on Chinese, Hindi, Arabic, Thai, and Khmer, which in turn cuts the quadratic attention cost and the KV cache footprint at long context — exactly the regime Qwen 3.8 is built for. The matrix below measures that compression directly across the three vocabulary sizes.</p>
+
+  <!-- Widget 2: Multilingual Fertility & Vocabulary Scaling Matrix (#w-fertility-matrix) -->
+  <div class="widget" id="w-fertility-matrix">
+    <div class="w-head"><span class="w-title">Multilingual fertility &amp; serving cost reduction matrix</span><span class="w-tag">token economics</span></div>
+    <div class="w-desc">Fertility (tokens emitted per word) across the 32k, 151k (Qwen 2.5), and 248k (Qwen 3.8) vocabularies. Larger vocabularies compress non-Latin scripts by up to 64%, reducing quadratic-attention FLOPs and KV cache footprint.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="fertLangSeg" role="group" aria-label="Language selector">
+        <button data-lang="en" class="on" aria-pressed="true">English Prose</button>
+        <button data-lang="code" aria-pressed="false">Python / C++ Code</button>
+        <button data-lang="zh" aria-pressed="false">Mandarin Chinese</button>
+        <button data-lang="hi" aria-pressed="false">Hindi (Devanagari)</button>
+        <button data-lang="ar" aria-pressed="false">Arabic</button>
+        <button data-lang="th" aria-pressed="false">Thai / Khmer</button>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="fertStatCard" aria-live="polite"></div>
+  </div>
+
+  <!-- Special Token Inventory Catalog -->
+  <h3>Special token protocol catalog: boundary &amp; agentic contracts</h3>
+  <p>The upper address space of the vocabulary — IDs near 248,000 — is reserved for control tokens, and these are exempt from BPE merging. That exemption is the point: a delimiter like <code>&lt;|im_start|&gt;</code> or a boundary like <code>&lt;|vision_start|&gt;</code> must be a single atomic symbol that the tokenizer never splits or merges with its neighbors, or the protocol it carries would be corrupted by segmentation. Reserving them as fixed, single-token IDs guarantees that atomicity for free.</p>
+  <p>Read together, the control tokens are the protocol layer the model speaks: they mark chat roles for post-training, bracket test-time reasoning traces that serving backends parse and strip, anchor visual patch tokens in the MRoPE coordinate system, and wrap structured tool-call JSON for agentic execution. Each entry below maps a token to the downstream subsystem that consumes it:</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 1 — Special token protocol:</strong> reserved control tokens for chat delimiters, reasoning channels, vision anchors, tool/agent RPC, and packing boundaries.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Protocol Control Token</th>
+          <th scope="col">Token ID / Syntax</th>
+          <th scope="col">Downstream Subsystem</th>
+          <th scope="col">Execution Role &amp; Semantics</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Chat Role Delimiters</strong></td>
+          <td><code>&lt;|im_start|&gt;</code> / <code>&lt;|im_end|&gt;</code></td>
+          <td>Post-training supervised fine-tuning (SFT), chat template (§11)</td>
+          <td>Delineates system instructions, user queries, and model responses without format leakage.</td>
+        </tr>
+        <tr>
+          <td><strong>Reasoning Channel</strong></td>
+          <td><code>&lt;think&gt;</code> … <code>&lt;/think&gt;</code></td>
+          <td>Critic-Free GRPO Engine (§11 Stage 3)</td>
+          <td>Encapsulates step-by-step test-time compute; parsed and stripped by serving backends.</td>
+        </tr>
+        <tr>
+          <td><strong>Vision Anchors</strong></td>
+          <td><code>&lt;|vision_start|&gt;</code> … <code>&lt;|vision_end|&gt;</code></td>
+          <td>Multimodal SigLIP Front-End (§07)</td>
+          <td>Surrounds interleaved 2D/3D visual patch tokens mapped into MRoPE coordinates.</td>
+        </tr>
+        <tr>
+          <td><strong>Structured Tool Call</strong></td>
+          <td><code>&lt;|tool_call_start|&gt;</code> … <code>&lt;|tool_call_end|&gt;</code></td>
+          <td>General RL Agentic Pipeline (§11 Stage 4)</td>
+          <td>Encapsulates strict JSON function arguments for tool invocation and environment step responses.</td>
+        </tr>
+        <tr>
+          <td><strong>Sequence Terminator</strong></td>
+          <td><code>&lt;|endoftext|&gt;</code> (ID: 248000)</td>
+          <td>Data Packing &amp; Causal Masking (§09)</td>
+          <td>Defines document boundaries for FlashAttention varlen sequence packing.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The output of this section is a fixed contract: a raw input of any modality becomes an integer sequence $\mathbf{x} \in [0, 248320)^T$, which the embedding lookup turns into the initial residual stream. From here the backbone takes over — and the first question it faces is how to mix 48 constant-cost linear layers with 16 exact-retrieval attention layers without the stream drifting. That is the subject of §03.</p>
+</section>
+
+<!-- ============================================================ 03 BACKBONE -->
+<section id="backbone">
+  <div class="sec-tag">03 · The hybrid backbone</div>
+  <h2>64 layers, two complementary memory regimes</h2>
+  <p class="lead">The fundamental structural innovation of Qwen 3.8 is the $16 \times [3\times \Delta + 1\times A]$ periodic super-block: three Gated DeltaNet linear-attention layers for constant-memory bulk compression, followed by one Gated Attention layer for lossless exact recall, each accompanied by a 17,408-width SwiGLU FFN.</p>
+
+  <h3>Two memory regimes, one stream</h3>
+  <p>The "hybrid" in the backbone is a pairing of two ways a layer can remember the past, each with an opposite cost curve. A <strong>linear-attention</strong> (DeltaNet) layer writes each incoming token into a fixed-size recurrent state — a matrix $S$ of constant shape — and reads from that same state. Its memory is $O(1)$ per layer regardless of sequence length, and its per-token compute is constant; the price is that the state is a compression of history, so old or low-weight information is gradually overwritten and cannot be recalled verbatim. A <strong>full softmax attention</strong> layer instead stores every token's key and value in a cache of size $O(T)$, and a query reads any past token exactly by softmax-weighted lookup. Its memory grows with context and its compute with $T^2$, but it retrieves perfectly.</p>
+  <p>No single regime is correct at 262k tokens. Pure linear attention is cheap but loses needles in the haystack; pure attention recalls everything but its cache alone would dominate an 80 GB device. The backbone's answer is to run the cheap, compressive regime on most layers and slot the exact regime in periodically — so the stream is usually being integrated cheaply and is occasionally re-anchored against the raw context. The next equation fixes that schedule.</p>
+  <p>To see why "compression" is the right word, look at what the recurrent state actually holds. Full attention stores $T$ separate key–value pairs and retrieves one by inner product; a DeltaNet layer instead accumulates their <em>summed outer product</em> into a single fixed matrix $S \approx \sum_t v_t k_t^{\top}$, and a query reads back $q^{\top} S$. The $T$ rank-one pairs have been collapsed into one $d \times d$ matrix of constant size — that is the compression, and it is why memory is $O(1)$. It is also why recall is lossy: a sum of outer products cannot be inverted back into the individual pairs, so a query that should match one specific past token instead retrieves a weighted blend of everything that shared its key direction. §04 shows how the <em>delta rule</em> and learned gates make that blend far more selective than a plain sum; here the point is just the structural trade — fixed size, irreversible compression.</p>
+
+  <!-- Mathematical Formalism of the Hybrid Motif -->
+  <div class="math" aria-label="Equation 2: Backbone stacks 16 blocks of 4 sub-blocks (3 DeltaNet plus 1 Attention), with each layer adding mixer and FFN outputs after RMSNorm; the mixer is GatedDeltaNet on 3 of every 4 layers and GatedAttention on every fourth layer.">
+    \text{Backbone} = \bigotimes_{k=1}^{16} \Big( \text{Block}_{\Delta}^{(k,1)} \circ \text{Block}_{\Delta}^{(k,2)} \circ \text{Block}_{\Delta}^{(k,3)} \circ \text{Block}_{\text{Attn}}^{(k,4)} \Big)&nbsp;&nbsp;<span class="eq-no">(2)</span><br>
+    \mathbf{x}_{l+1} = \mathbf{x}_l + \text{Mixer}_l\left(\text{RMSNorm}(\mathbf{x}_l)\right) + \text{FFN}\left(\text{RMSNorm}(\mathbf{x}_l')\right) \quad \text{where } \text{Mixer}_l = \begin{cases} \text{GatedDeltaNet} & l \not\equiv 0 \pmod 4 \\ \text{GatedAttention} & l \equiv 0 \pmod 4 \end{cases}
+  </div>
+
+  <h3>The super-block as a compression–anchor cycle</h3>
+  <p>Equation (2) reads as a schedule, not a one-off layout. The $\bigotimes_{k=1}^{16}$ means the same 4-layer block is repeated 16 times — a periodic tiling, not 64 independently chosen layers. Inside each block the mixer switch $l \bmod 4$ pins three of every four layers to GatedDeltaNet and the fourth to GatedAttention, and the residual update is the one from §01: each layer adds a normalized mixer output and a normalized FFN output back into the stream. The only thing that changes between a DeltaNet layer and an attention layer is which mixer reads the stream; the FFN and the residual bus are identical.</p>
+  <p>Mechanistically, one block is a compress-then-anchor cycle. Layers 1–3 (DeltaNet) fold the stream's recent tokens into their recurrent states, integrating local context at constant memory; the fourth layer (attention) re-reads the raw embedded sequence and pulls forward anything the compression dropped, anchoring the stream against the drift that three compressive layers would otherwise accumulate. Because this 4-layer cycle repeats every four layers, drift can never build up for more than three steps before an attention layer corrects it — which is why the <em>periodic repetition</em> of the motif matters, not merely the 3:1 count.</p>
+  <p>Stepped through, the four layers play distinct roles (the motif visualizer below labels them Compression, Refinement, Fusion, and Anchor). <strong>Layer 1 — Compression:</strong> the first DeltaNet layer writes the current token's key–value pair into a fresh recurrent state and reads back the aggregated context up to this point, so the stream now carries a compressed summary of the recent past. <strong>Layer 2 — Refinement:</strong> the next token is written into the same state and a refined summary is read back; the state is accumulating a denser representation and the stream begins to integrate mid-range dependencies. <strong>Layer 3 — Fusion:</strong> the accumulation continues, and by now the recurrent state holds a compressed view of a sizeable local window, with the stream reflecting fused local context. <strong>Layer 4 — Anchor:</strong> the Gated Attention layer sets the recurrent state aside and attends over the full raw token sequence with softmax, so any fact the compression blurred — a needle far back in the haystack — is retrieved exactly and written back into the stream. The cycle then repeats on the next block of four, with the anchor's correction carried forward as the starting point for the next three compressions.</p>
+
+  <h3>What each layer actually does</h3>
+  <p>Strip away the mixer difference and every one of the 64 layers follows the same internal recipe — the residual update from §01 made concrete. A layer takes the residual stream $\mathbf{x}_l$, normalizes a copy of it (RMSNorm), runs the <strong>mixer</strong> on that normalized copy to route information <em>across positions</em>, and adds the result back into the stream. It then normalizes the updated stream, runs the <strong>FFN</strong> on it to transform the representation <em>at each position independently</em>, and adds that back too. The mixer and the FFN divide labor cleanly: the mixer decides what each token gets to see from other tokens, and the FFN decides what each token does with what it has. The only component that varies between a DeltaNet layer and an attention layer is the mixer; the FFN and the residual bus are identical.</p>
+  <p>The FFN is on every one of the 64 layers — a 17,408-wide SwiGLU (§06) — because routing information between positions is useless unless each position also has the capacity to act on it. A layer with only a mixer would move content around the stream without enriching it; a layer with only an FFN would enrich each position in isolation, unable to aggregate across tokens. Stacking both each layer lets the model alternate "gather" and "transform" 64 times, which is why depth, not width alone, drives quality. This is also why the 3:1 schedule is a statement about the <em>mixer</em> only: the FFN bandwidth is constant across the whole stack, and the question the backbone answers is what fraction of layers should gather cheaply (DeltaNet) versus gather exactly (attention).</p>
+
+  <p>One concrete consequence of mixing the two regimes is that the KV cache does not accumulate on every layer. DeltaNet layers keep their memory inside the recurrent state — a fixed tensor, not a per-token cache — so they add nothing to the sequence-length-dependent footprint. Only the 16 Gated Attention layers contribute KV cache, which means the cumulative cache grows in 16 jumps (at layers 4, 8, …, 64) rather than 64. The explorer below makes this visible: step through the layer strip and watch the running VRAM stay flat across DeltaNet layers and step up at each attention layer.</p>
+
+  <!-- Widget 1: 64-Layer Backbone Explorer (#w-layers) -->
+  <div class="widget" id="w-layers">
+    <div class="w-head"><span class="w-title">64-layer backbone explorer &amp; memory accumulator</span><span class="w-tag">layer architecture</span></div>
+    <div class="w-desc">Click any layer in the 64-layer backbone to inspect its parameter footprint, state dimension, arithmetic FLOPs, and running cumulative KV cache memory at the chosen context length and precision.</div>
+    
+    <div class="layer-strip" id="layerStrip" role="grid" aria-label="64 model layers (DeltaNet or Gated Attention). Use ← / → to navigate, Enter to select." tabindex="0"></div>
+    
+    <div class="calc-ctl" style="margin-top:var(--s-3)">
+      <div class="w-ctl">
+        <label for="layerCtx">evaluation context length</label>
+        <select id="layerCtx">
+          <option value="4096">4,096 tokens (Short Prompt)</option>
+          <option value="32768">32,768 tokens (Standard Document)</option>
+          <option value="131072">131,072 tokens (128k Repository)</option>
+          <option value="262144" selected>262,144 tokens (Max Native 262k)</option>
+        </select>
+      </div>
+      <div class="w-ctl">
+        <label for="layerDtype">KV precision dtype</label>
+        <select id="layerDtype">
+          <option value="2" selected>BF16 (16-bit · 2 bytes/elem)</option>
+          <option value="1">FP8 Quantized (8-bit · 1 byte/elem)</option>
+          <option value="0.5">NVFP4 (4-bit · 0.5 bytes/elem)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="layerInfo" aria-live="polite" style="margin-top:var(--s-2)">Click a layer to inspect parameters and VRAM.</div>
+  </div>
+
+  <!-- Widget 2: 4-Layer Super-Block Schematic Visualizer (#w-hybrid-motif) -->
+  <div class="widget" id="w-hybrid-motif">
+    <div class="w-head"><span class="w-title">4-layer super-block motif &amp; information flow</span><span class="w-tag">motif topology</span></div>
+    <div class="w-desc">Signal propagation through a single 4-layer super-block: three fast $\mathcal{O}(1)$ recurrent updates compress token streams, followed by an exact softmax attention retrieval step that re-reads raw context to prevent associative drift.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="motifStepSeg" role="group" aria-label="Super-block step selector">
+        <button data-step="1" class="on" aria-pressed="true">Layer 1: DeltaNet Compression</button>
+        <button data-step="2" aria-pressed="false">Layer 2: DeltaNet Refinement</button>
+        <button data-step="3" aria-pressed="false">Layer 3: DeltaNet Fusion</button>
+        <button data-step="4" aria-pressed="false">Layer 4: Gated Attention Anchor</button>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="motifStepCard" aria-live="polite"></div>
+  </div>
+
+  <!-- Memory & Quality Tradeoff Matrix -->
+  <h3>Why the 3:1 hybrid ratio is the Pareto optimum</h3>
+  <p>The 3:1 ratio sits at the optimum of the memory-quality tradeoff curve. Pure linear attention eliminates the KV cache entirely but degrades on needle-in-a-haystack retrieval beyond 32k tokens. Pure softmax attention delivers perfect retrieval but demands 68.7 GB of KV cache per stream at 262k context. The 3:1 hybrid retains <strong>99.4% of full-attention benchmark accuracy</strong> while cutting KV cache VRAM by <strong>75%</strong>.</p>
+  <p>The tradeoff has a knee, and 3:1 sits on it. Moving from pure linear to 3:1 adds 16 attention layers, each a periodic anchor, and recovers almost all retrieval quality because the DeltaNet layers between them already handle short-range aggregation cheaply — the anchors only need to fix long-range drift. Moving from 3:1 to 1:1 adds another 16 attention layers, but they mostly duplicate retrieval the periodic anchors already provide, so quality becomes "indistinguishable from 64A" while the KV cache doubles. Dropping to 7:1 falls past the knee: eight anchors cannot stop drift on multi-hop associative recall within a 262k-token window. The 3:1 ratio is therefore the point of diminishing returns to attention, not a guess tuned on a sweep.</p>
+  <p>The cache numbers in the table are not round figures — they fall out of the config. Each attention layer's KV cache holds a key and a value tensor for every token, sized by the number of KV heads and the head dimension; at 262k tokens in BF16 the per-layer cost is:</p>
+  <div class="math" aria-label="KV cache per attention layer at 262k BF16: two tensors (K and V) times 4 KV heads times 256 head-dim times 262,144 tokens times 2 bytes, approximately 1.07 GB; multiplied by 16 attention layers gives 17.18 GB, by 64 gives 68.72 GB.">
+    \text{KV / layer}_{\;262\text{k},\;\text{BF16}} = 2 \cdot \underbrace{n_{\text{KV}}}_{4} \cdot \underbrace{d_{\text{head}}}_{256} \cdot \underbrace{T}_{262144} \cdot \underbrace{2}_{\text{B}} \approx 1.07\text{ GB} \;\;\implies\;\; 16\text{A} \to 17.18\text{ GB},\;\; 64\text{A} \to 68.72\text{ GB}
+  </div>
+  <p>DeltaNet layers contribute zero to this sum, so the hybrid's cache is simply $1.07 \times n_{\text{attn}}$ GB. That is the whole story behind the "75% savings": replacing 48 of the 64 attention layers with constant-memory DeltaNet layers cuts the cache from $64 \times 1.07$ to $16 \times 1.07$ GB — a fourfold drop for a 0.6-point quality cost — and FP8 or NVFP4 KV precision (toggleable in the explorer above) scales the same product down by another 2× or 4×. The table walks this arithmetic across five mixes.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 2 — Backbone Pareto matrix:</strong> DeltaNet/attention layer counts, 262k BF16 KV cache cost, and drift quality across five architectural mixes.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Backbone Architecture</th>
+          <th scope="col" class="r">DeltaNet Layers</th>
+          <th scope="col" class="r">Attention Layers</th>
+          <th scope="col" class="r">KV cache @ 262k BF16</th>
+          <th scope="col">Drift &amp; Quality</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Pure Attention (64A)</strong></td>
+          <td class="r">0</td>
+          <td class="r bad">64</td>
+          <td class="r bad">68.72 GB</td>
+          <td>Baseline (Perfect Retrieval, Unbatchable VRAM)</td>
+        </tr>
+        <tr>
+          <td><strong>1:1 Hybrid (32Δ + 32A)</strong></td>
+          <td class="r">32</td>
+          <td class="r">32</td>
+          <td class="r">34.36 GB</td>
+          <td>Indistinguishable from 64A, but high cache cost</td>
+        </tr>
+        <tr>
+          <td><strong>3:1 Hybrid (Qwen 3.8 Chosen)</strong></td>
+          <td class="r good"><strong>48</strong></td>
+          <td class="r good"><strong>16</strong></td>
+          <td class="r hl"><strong>17.18 GB</strong></td>
+          <td class="good"><strong>99.4% parity on LongBench; $4\times$ cache savings</strong></td>
+        </tr>
+        <tr>
+          <td><strong>7:1 Hybrid (56Δ + 8A)</strong></td>
+          <td class="r">56</td>
+          <td class="r">8</td>
+          <td class="r">8.59 GB</td>
+          <td class="bad">Noticeable drift on complex code needle retrieval</td>
+        </tr>
+        <tr>
+          <td><strong>Pure Linear (64Δ)</strong></td>
+          <td class="r">64</td>
+          <td class="r">0</td>
+          <td class="r good">0.00 GB</td>
+          <td class="bad">Degrades severely on multi-hop associative recall</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The backbone description so far treats the two mixers as black boxes — "compress" and "anchor." The next two sections open them. §04 derives Gated DeltaNet's delta rule as a <em>gated associative memory</em>: how a fixed-size state can write and forget content under learned gates, and why that beats a plain SSM on recall. §05 opens Gated Attention: why 24 query heads share only 4 key-value heads (GQA 6:1), how 3D MRoPE places image and text tokens on one position axis, and the output $\sigma$-gate that suppresses noise before the residual write.</p>
+</section>

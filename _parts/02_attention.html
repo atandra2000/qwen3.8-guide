@@ -1,0 +1,313 @@
+<!-- ============================================================ 04 DELTANET -->
+<section id="deltanet">
+  <div class="sec-tag">04 · Gated DeltaNet — the linear-attention engine</div>
+  <h2>Constant-memory associative recall via test-time fast weights</h2>
+  <p class="lead">In 48 of the 64 layers, Qwen 3.8 replaces quadratic $T \times T$ softmax attention with Gated DeltaNet. Instead of storing past tokens in an unbounded KV cache, each layer maintains a fixed-size $128 \times 128$ associative memory matrix $S_t \in \mathbb{R}^{d_k \times d_v}$ per head, continuously updated via an error-driven delta rule with data-dependent input and decay gates.</p>
+
+  <h3>From additive superposition to error-correcting writes</h3>
+  <p>The state $S_t$ is a <em>fast weight</em> matrix — "fast" because it is written at inference time by the data passing through the layer, in contrast to the "slow" learned projection weights that produce the queries, keys, and values. The name DeltaNet is literally "delta rule on a net": the state is updated by an error-correcting rule rather than by accumulation. To see why that matters, start from what plain linear attention does. It writes each token additively, $S_t = S_{t-1} + v_t k_t^{\top}$. Every new key–value pair is simply summed in, so writing a new value at an address $k$ that already holds an old value does not remove the old one — the two outer products coexist, and a later query $q \approx k$ retrieves a blend of both. Over a long sequence the state saturates into a superposition of every pair ever written, and individual records become irrecoverable ghosts. That is the failure mode the widget below calls "destructive ghost traces."</p>
+  <p>The delta rule replaces the sum with an overwrite. Equation (3) writes $S_t = \alpha_t\big[S_{t-1}(I - \beta_t k_t k_t^{\top}) + \beta_t v_t k_t^{\top}\big]$. Ignore $\alpha_t$ for a moment and read the bracket in two steps. First, $S_{t-1}(I - \beta_t k_t k_t^{\top})$: because $k_t$ is L2-normalized, $k_t k_t^{\top}$ is the projector onto the $k_t$ direction, so $(I - \beta_t k_t k_t^{\top})$ removes — or scales down — whatever $S_{t-1}$ currently stores at address $k_t$. Second, $+\beta_t v_t k_t^{\top}$ stamps the new record $(k_t, v_t)$ into the vacated slot. The net effect is a <em>targeted overwrite</em>: writing $(k, v)$ replaces the old association at $k$ while leaving every other address intact, instead of layering the new on top of the old. With $\beta_t = 1$ this is exact — $S_t k_t = v_t$ to within the projection — which is why the delta rule is called error-correcting: the update is precisely the correction that makes the state satisfy $S k = v$.</p>
+  <p>The $\alpha_t$ out front is a global decay applied after the write, and it is what stops the fixed-size state from filling up forever; we return to it below. The structural point is that the delta rule turns the recurrent state from a lossy sum (which can only blur) into an addressable memory that can update a single slot in place. That is the mechanism behind the "constant-memory associative recall" in the section title, and it is what lets 48 of the 64 layers dispense with the KV cache entirely.</p>
+
+  <!-- Gated DeltaNet Mathematical Foundations -->
+  <div class="math" aria-label="Equations 3 and 4: Gated DeltaNet update rule. State S_t is decayed by alpha_t and updated by a rank-1 beta_t times v_t times k_t transpose; output y_t is S_t transpose times q_t. Gates alpha and beta come from softplus and sigmoid paths respectively. Q and K are 16 by 128, V is 48 by 128, giving a 786,432-element state per layer.">
+    S_t = \alpha_t \cdot \Big[ S_{t-1} (I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T \Big] \quad ; \quad \mathbf{y}_t = S_t^T q_t&nbsp;&nbsp;<span class="eq-no">(3)</span><br>
+    \alpha_t = \exp\big(-\text{softplus}(A_k \tilde{k}_t + b)\big) \in (0, 1) \quad ; \quad \beta_t = 2\sigma(W_g \hat{x}_t) \in (0, 2]&nbsp;&nbsp;<span class="eq-no">(4)</span><br>
+    q_t, k_t \in \mathbb{R}^{16 \times 128} \quad ; \quad v_t \in \mathbb{R}^{48 \times 128} \quad ; \quad \text{State Size} = 48 \times (128 \times 128) = \mathbf{786,432\text{ elements / layer}}
+  </div>
+
+  <h3>The two gates: how fast to forget, how hard to write</h3>
+  <p>Equation (4) makes the two scalars in (3) data-dependent, and that data-dependence is the entire "Gated" in Gated DeltaNet. The <strong>write gate</strong> $\beta_t = 2\sigma(W_g \hat{x}_t) \in (0, 2]$ sets how hard the current token stamps its $(k, v)$ pair into the state. Its cap at 2 is not a convenience — it is a stability bound. Because $k_t$ is unit-norm, the rank-one projector $k_t k_t^{\top}$ has eigenvalue $1$ along $k_t$, so the write operator $(I - \beta_t k_t k_t^{\top})$ has eigenvalue $1 - \beta_t$ along that direction. Capping $\beta_t \le 2$ keeps $1 - \beta_t \in [-1, 1)$, a non-expanding contraction: the state norm can never grow from a write. Letting $\beta_t$ exceed $2$ would make $|1 - \beta_t| > 1$, and the write would overshoot, oscillate, and diverge over a long sequence. Within the cap, the model is free to learn $\beta_t \approx 2$ for salient tokens it must stamp firmly and $\beta_t \approx 0$ for filler it should barely write.</p>
+  <p>The <strong>decay gate</strong> $\alpha_t = \exp(-\text{softplus}(A_k \tilde{k}_t + b)) \in (0, 1)$ sets how much of the old state survives into the next step. The $\exp$ of a negative softplus is strictly below $1$ and strictly above $0$, so every step is dissipative — the state can only shrink, never amplify — and the network's job is to learn <em>how fast</em> to forget. Important, repeatedly-referenced tokens get $\alpha_t$ near $1$ and persist; irrelevant tokens get $\alpha_t$ near $0$ and are evicted, recycling the fixed state capacity. This is the other half of avoiding saturation: the delta rule prevents <em>spatial</em> collisions (overwriting the right slot), and the decay gate prevents <em>temporal</em> saturation (clearing stale records). Crucially, both gates are functions of the input, not fixed constants — a plain SSM decays on a fixed schedule regardless of content, which is why a content-aware gate beats it on recall.</p>
+
+  <!-- Widget 1: Interactive Delta-Rule Associative Memory Lab (#w-delta) -->
+  <div class="widget" id="w-delta">
+    <div class="w-head"><span class="w-title">Associative memory playground — targeted overwrite vs superposition</span><span class="w-tag">fast weights</span></div>
+    <div class="w-desc">Simulation of an associative memory matrix $S_t \in \mathbb{R}^{4 \times 4}$. While standard linear attention adds values without erasing past associations (causing memory saturation and destructive ghost traces), Gated DeltaNet applies the error-correcting delta rule $(I - \beta_t k_t k_t^T)$ to cleanly replace stale records while keeping unrelated slots intact.</div>
+    
+    <div class="calc-ctl">
+      <div class="w-ctl" style="flex:1.1">
+        <label for="deltaModeSel">memory update algorithm</label>
+        <select id="deltaModeSel">
+          <option value="deltanet" selected>Gated DeltaNet (Delta Rule)</option>
+          <option value="linear">Pure Linear Attention (Additive)</option>
+        </select>
+      </div>
+      <div class="w-ctl" style="flex:1">
+        <label for="deltaKeySel">target memory slot (key k)</label>
+        <select id="deltaKeySel">
+          <option value="0" selected>Slot 0 · User Intent</option>
+          <option value="1">Slot 1 · Doc Context</option>
+          <option value="2">Slot 2 · Tool State</option>
+          <option value="3">Slot 3 · Working Var</option>
+        </select>
+      </div>
+      <div class="w-ctl" style="flex:1.1">
+        <label for="deltaValInput">feature payload (value v)</label>
+        <select id="deltaValInput">
+          <option value="alpha" selected>Alpha · [+1.0, +0.6, +0.2, -0.4]</option>
+          <option value="beta">Beta · [-0.8, +1.0, +0.5, 0.0]</option>
+          <option value="gamma">Gamma · [0.0, -0.7, +1.0, +0.8]</option>
+          <option value="delta">Delta · [+0.5, +0.8, -0.9, +0.3]</option>
+          <option value="zero">Zero · [0.0, 0.0, 0.0, 0.0]</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="delta-action-bar">
+      <div class="delta-presets" role="group" aria-label="Guided test scenarios">
+        <span class="preset-label">Scenarios:</span>
+        <button type="button" class="w-btn ghost" id="btnScenarioOverwrite" title="Write Alpha to Slot 0, then overwrite with Beta">🧪 Overwrite Collision</button>
+        <button type="button" class="w-btn ghost" id="btnScenarioMulti" title="Write unique features across all 4 slots sequentially">🧪 Fill 4 Slots</button>
+      </div>
+      <div class="delta-btns">
+        <button type="button" class="w-btn primary" id="btnDeltaWrite">Write k → v</button>
+        <button type="button" class="w-btn" id="btnDeltaDecay">Apply Decay (α = 0.85)</button>
+        <button type="button" class="w-btn" id="btnDeltaReset">Reset S → 0</button>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="deltaLabReadout" aria-live="polite" style="margin-top:var(--s-3)"></div>
+  </div>
+
+  <h3>Training parallelism: the chunked WY factorization</h3>
+  <p>The recurrence in (3) is inherently sequential: $S_t$ depends on $S_{t-1}$, which depends on $S_{t-2}$, and so on back to $S_0$. During decode this is fine — one step per token, $O(1)$ memory. During pretraining, where the whole sequence must be processed at once, a naive serial scan over thousands of tokens would leave the Tensor Cores idle and dominate the step time. The fix is to chunk the sequence into blocks of size $C$ (default 64) and factor the within-chunk interaction so it can be computed as matmuls rather than a recurrence.</p>
+  <p>The factorization rests on the identity $\prod_{t=1}^{C}(I - \beta_t k_t k_t^{\top}) = I - W Y^{\top}$ (Table 3, row 5): the product of $C$ rank-one write operators inside a chunk collapses to a single $I - W Y^{\top}$, where $W$ and $Y$ are built from the chunk's keys, values, and gates. Within a chunk, all $C$ token-to-state interactions become a block-triangular $W Y^{\top}$ matmul — causal, because token $t$ only sees earlier tokens — which runs on Tensor Cores in parallel. Between chunks, only the single state matrix $S$ is carried forward sequentially, in FP32 for stability. The chunk size trades parallelism against serial depth: $C = 64$ keeps the triangular solve cheap while exposing enough parallel work to saturate the hardware. The visualizer below shows both regimes side by side.</p>
+
+  <!-- Widget 2: Chunked WY Parallel Scan Visualizer (#w-deltanet-scan) -->
+  <div class="widget" id="w-deltanet-scan">
+    <div class="w-head"><span class="w-title">Chunked WY parallel training scan vs streaming decode</span><span class="w-tag">hardware tiling</span></div>
+    <div class="w-desc">During pretraining, DeltaNet overcomes recurrence bottlenecks by grouping sequences into chunks of size $C=64$. Intra-chunk interactions factor into block-triangular $W Y^T$ matmuls on Tensor Cores, while inter-chunk states propagate sequentially in FP32.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="wyChunkSeg" role="group" aria-label="Chunk size selector">
+        <button data-chunk="32" aria-pressed="false">Chunk Size C = 32</button>
+        <button data-chunk="64" class="on" aria-pressed="true">Chunk Size C = 64 (Default)</button>
+        <button data-chunk="128" aria-pressed="false">Chunk Size C = 128</button>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="wyScanVisual" aria-live="polite"></div>
+  </div>
+
+  <!-- DeltaNet Asymmetric Head Architecture Breakdown -->
+  <h3>Asymmetric head layout: 16 address channels for 48 memory heads</h3>
+  <p>The DeltaNet configuration uses an asymmetric projection layout: <strong>16 Query/Key heads</strong> ($d_k = 128$) controlling <strong>48 Value heads</strong> ($d_v = 128$). This design optimizes memory capacity while minimizing write address collisions.</p>
+  <p>The clearest way to read this layout is as an address–content split: keys are <em>addresses</em> (which slot to write), values are <em>content</em> (what to store there). The 16 query/key heads give 16 address channels — enough routing resolution that two distinct tokens rarely hash to the same address and collide. The 48 value heads give 48 content channels, so each addressed slot stores a rich 128-vector record rather than a single scalar. The $48/16 = 3{:}1$ ratio means each address coordinates three content heads: capacity is tripled per address without tripling the address space, which keeps key routing sharp and the query/key projection small. Splitting them asymmetrically — few addresses, many content channels — is what maximizes stored information per unit of projection parameter.</p>
+  <ul>
+    <li><strong>Value Head Count ($n_v = 48$)</strong>: Governs the total associative memory capacity per layer ($48 \times 128 \times 128 = 786,432\text{ state floats}$). Across all 48 DeltaNet layers, the entire model maintains <strong>$37.75\text{M floats}$ ($75.5\text{ MB}$ in BF16)</strong> of recurrent state — fixed whether processing 10 tokens or 1,000,000 tokens.</li>
+    <li><strong>Query/Key Head Count ($n_{qk} = 16$)</strong>: Each address channel coordinates writes across 3 value heads ($48/16 = 3:1$ ratio), providing sharp key routing without inflating query projection weights.</li>
+    <li><strong>Single Fused Input Projection</strong>: A single GEMM projects $x \in \mathbb{R}^{5120} \to \mathbb{R}^{10240}$ to simultaneously produce $Q, K, V$, gating channels, and causal depthwise 1D conv inputs in a single kernel launch.</li>
+  </ul>
+
+  <!-- Numerical Stability Checklist -->
+  <h3>Numerical stability checklist: the five kernel invariants</h3>
+  <p>Over 262k recurrent steps, any per-step operation that expands the state even slightly will diverge. A factor of $1.001$ per step compounds to $\approx 10^{114}$ over the native context — an astronomical blow-up, not a small drift — so the kernel is built entirely from non-expanding maps. The five invariants below are not independent precautions; they are five views of one principle: every map the state passes through must be a contraction or a norm-preservation, never an amplification.</p>
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 3 — Numerical stability checklist:</strong> five kernel invariants (L2 norm, exp-clamp, log-shift, ‖S‖-bound, ε-floor) and the run-length bug each prevents.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Stability Mechanism</th>
+          <th scope="col">Mathematical Invariant</th>
+          <th scope="col">Engineering Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>L2 Query/Key Normalization</strong></td>
+          <td>$\|q_t\|_2 = 1.0 \quad ; \quad \|k_t\|_2 = 1.0$</td>
+          <td>Bounds update magnitude; prevents recurrent state norm explosion over 262k steps.</td>
+        </tr>
+        <tr>
+          <td><strong>Write Gate Contraction Bound</strong></td>
+          <td>$\beta_t = 2\sigma(W_g \hat{x}_t) \in (0, 2]$</td>
+          <td>Guarantees $(I - \beta_t k_t k_t^T)$ remains a non-expanding contraction mapping.</td>
+        </tr>
+        <tr>
+          <td><strong>Decay Gate Multiplicative Shrink</strong></td>
+          <td>$\alpha_t = \exp(-\text{softplus}(\cdot)) \in (0, 1)$</td>
+          <td>Ensures forgetting is strictly dissipative; network learns <em>how fast</em> to forget.</td>
+        </tr>
+        <tr>
+          <td><strong>Mixed-Precision Boundary States</strong></td>
+          <td>BF16 state accumulator, BF16 GEMM</td>
+          <td>Preserves delicate subtraction cancellations in $(I - \beta k k^T)$ without underflow.</td>
+        </tr>
+        <tr>
+          <td><strong>Triangular WY Factorization</strong></td>
+          <td>$\prod_{t=1}^C (I - \beta_t k_t k_t^T) = I - W Y^T$</td>
+          <td>Replaces $\mathcal{O}(C^3)$ serial matrix multiplies with one stable $\mathcal{O}(C^2)$ triangular solve.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Gated DeltaNet gives the backbone its constant-memory compression: 48 layers that integrate the stream for free, with a fixed 75.5 MB of recurrent state regardless of context length. But compression alone cannot guarantee that a specific far-back token is retrieved — the decay gate may have evicted it, and its address may have been overwritten. That guarantee is the job of the 16 full-attention layers, which skip the recurrent state and read the raw sequence directly. §05 opens that other mixer: Gated Attention, its 6:1 GQA head grouping, the 3D MRoPE that positions image and text tokens on one axis, and the output $\sigma$-gate that filters the attention output before it touches the residual stream.</p>
+</section>
+
+<!-- ============================================================ 05 ATTENTION -->
+<section id="attention">
+  <div class="sec-tag">05 · Gated Attention &amp; 3D MRoPE</div>
+  <h2>Sixteen sparse anchors of exact associative recall</h2>
+  <p class="lead">Every fourth layer in the 64-layer backbone (layers 4, 8, 12, ..., 64) is a Gated Attention block with Grouped-Query Attention (GQA 6:1), wide 256-dimensional query heads, partial 3D MRoPE, and a learned output sigmoid gate. These 16 layers act as global retrieval anchors that periodically refresh the recurrent associative memory.</p>
+
+  <h3>Grouped-Query Attention: sharing the cache</h3>
+  <p>The KV cache is the attention layer's memory cost, and it scales with the number of key/value heads, not the number of query heads. Standard Multi-Head Attention (MHA) gives every query head its own K and V projection — $n_{kv} = n_q = 24$ — so 24 distinct key/value tensors are cached per token. At the other extreme, Multi-Query Attention (MQA) collapses all 24 query heads onto a single shared K,V pair ($n_{kv} = 1$), shrinking the cache 24× but degrading quality because every head must read the same stored representation. Grouped-Query Attention (GQA) splits the difference: query heads are partitioned into groups, and each group shares one K,V head. Qwen 3.8 uses $n_{kv} = 4$, so the 24 query heads form 4 groups of 6 — the "GQA 6:1" — and the cache is 6× smaller than MHA.</p>
+  <p>Sharing the K,V heads is safe because query heads differentiate through their <em>query</em> projections, not through needing separate stored keys and values. Two heads reading the same K,V cache still attend to different relations, since each computes its own $Q$ and its own softmax weights; what they share is the raw key/value representation of each past token, which is largely common property. The remaining design lever is head width: Qwen 3.8 uses wide 256-dimensional heads, so each of the 4 K,V heads stores a rich 256-vector per token and each query head matches against a 256-dim key. Wide heads recover the expressivity that fewer heads sacrifice, which is why GQA-4 lands at "zero accuracy loss" in the table below while MQA does not. The σ-gate added in (7) compensates the rest.</p>
+
+  <!-- Attention Mathematics & Gating Formalism -->
+  <div class="math" aria-label="Equations 5 to 7: Gated multi-head attention with grouped-query attention: 24 query heads of dim 256, 4 key and 4 value heads of dim 256, MRoPE-positioned softmax attention with causal mask, then a sigmoid gate applied before the output projection W_o mapping 6144 to 5120.">
+    Q = x W_q \in \mathbb{R}^{B \times T \times (24 \times 256)} \quad ; \quad K = x W_k \in \mathbb{R}^{B \times T \times (4 \times 256)} \quad ; \quad V = x W_v \in \mathbb{R}^{B \times T \times (4 \times 256)}&nbsp;&nbsp;<span class="eq-no">(5)</span><br>
+    \text{Attn}(Q, K, V) = \text{Softmax}\left(\frac{\text{MRoPE}(Q) \cdot \text{MRoPE}(K)^T}{\sqrt{d_k}} + M_{\text{causal}}\right) V \in \mathbb{R}^{B \times T \times (24 \times 256)}&nbsp;&nbsp;<span class="eq-no">(6)</span><br>
+    \mathbf{y}_{\text{attn}} = \left( \sigma(x W_g) \odot \text{Attn}(Q, K, V) \right) W_o \quad \text{where } W_o \in \mathbb{R}^{6144 \to 5120}&nbsp;&nbsp;<span class="eq-no">(7)</span>
+  </div>
+
+  <!-- Widget 1: Interactive KV cache Memory & GQA Calculator (#w-cache) -->
+  <div class="widget" id="w-cache">
+    <div class="w-head"><span class="w-title">GQA KV cache memory footprint &amp; bandwidth calculator</span><span class="w-tag">cache economics</span></div>
+    <div class="w-desc">Exact VRAM requirements of the 16 attention layers across context lengths ($1\text{k} \to 262\text{k}$) and batch sizes; the GQA 6:1 scheme ($n_{kv}=4$) is compared against standard Multi-Head Attention ($n_{kv}=24$).</div>
+    
+    <div class="calc-ctl">
+      <div class="w-ctl">
+        <label for="cacheCtx">sequence context length (tokens)</label>
+        <select id="cacheCtx">
+          <option value="4096">4,096 tokens (Standard Pretraining)</option>
+          <option value="32768">32,768 tokens (Long Document)</option>
+          <option value="131072">131,072 tokens (128k Repository)</option>
+          <option value="262144" selected>262,144 tokens (Max Native 262k)</option>
+        </select>
+      </div>
+      <div class="w-ctl">
+        <label for="cacheBatch">concurrent batch size (B)</label>
+        <select id="cacheBatch">
+          <option value="1" selected>Batch Size 1 (Single User Chat)</option>
+          <option value="4">Batch Size 4 (Low-Concurrency Server)</option>
+          <option value="16">Batch Size 16 (High-Throughput Node)</option>
+          <option value="64">Batch Size 64 (Production Cluster Pod)</option>
+        </select>
+      </div>
+      <div class="w-ctl">
+        <label for="cacheDtype">KV cache precision dtype</label>
+        <select id="cacheDtype">
+          <option value="2" selected>FP16 / BF16 (16-bit · 2 bytes/elem)</option>
+          <option value="1">FP8 Quantized (8-bit · 1 byte/elem)</option>
+          <option value="0.5">FP4 / TurboQuant (4-bit · 0.5 bytes/elem)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="cacheReadout" aria-live="polite"></div>
+  </div>
+
+  <!-- GQA Head Architecture Comparison Table -->
+  <h3>KV-head reduction: MHA → MQA → GQA</h3>
+  <p>Standard Multi-Head Attention (MHA) allocates dedicated key/value projections for all 24 query heads, requiring 103 GB of cache per stream at 262k context. Grouped-Query Attention pools 6 query heads into each KV head, reducing KV cache memory by <strong>83.3%</strong> while preserving retrieval sharpness via wide 256-dim head projections.</p>
+  <p>The cache figures in the table follow directly from the head counts. Each token stores a key and a value for every KV head, so the per-token, per-layer footprint is $2 \cdot n_{kv} \cdot d_{\text{head}} \cdot \text{bytes}$; at BF16 with $d_{\text{head}} = 256$:</p>
+  <div class="math" aria-label="KV cache bytes per token per layer equals 2 times n_kv times 256 times 2 bytes, i.e. 1024 times n_kv; MHA(24) gives 24,576 B, GQA-4 gives 4,096 B, MQA(1) gives 1,024 B.">
+    \text{Bytes / token / layer} = 2 \cdot n_{\text{kv}} \cdot 256 \cdot 2 = 1024 \cdot n_{\text{kv}} \;\;\implies\;\; \text{MHA}(24) \to 24{,}576\text{ B},\; \text{GQA-}4 \to 4{,}096\text{ B},\; \text{MQA}(1) \to 1{,}024\text{ B}
+  </div>
+  <p>Multiplying by 262,144 tokens and 16 attention layers recovers the table's rightmost column: GQA-4 sums to $4{,}096 \times 262{,}144 \times 16 \approx 17.18$ GB — the same $1.07$ GB/layer figure derived in §03 — while MHA reaches $\approx 103$ GB. The "83.3%" saving is simply $(24-4)/24$, the fraction of KV heads removed, and it costs no accuracy because the wide 256-dim heads and the σ-gate below absorb the lost expressivity.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 4 — GQA progression MHA → MQA → GQA:</strong> KV-head count, bytes/token/layer, 262k × 16-layer VRAM, and retrieval-precision trade-off at each step.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Attention Scheme</th>
+          <th scope="col" class="r">KV Heads ($n_{kv}$)</th>
+          <th scope="col" class="r">Bytes / Token / Layer</th>
+          <th scope="col" class="r">VRAM @ 262k × 16 Layers</th>
+          <th scope="col">Retrieval Precision</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Full MHA</strong> (24 KV Heads)</td>
+          <td class="r">24</td>
+          <td class="r">24,576 B</td>
+          <td class="r bad">103.0 GB</td>
+          <td>Theoretical Reference</td>
+        </tr>
+        <tr>
+          <td><strong>GQA-8</strong> (8 KV Heads)</td>
+          <td class="r">8</td>
+          <td class="r">8,192 B</td>
+          <td class="r">34.4 GB</td>
+          <td>Indistinguishable from MHA</td>
+        </tr>
+        <tr>
+          <td><strong>GQA-4 (Qwen 3.8 Chosen)</strong></td>
+          <td class="r good"><strong>4</strong></td>
+          <td class="r hl"><strong>4,096 B</strong></td>
+          <td class="r good"><strong>17.18 GB</strong></td>
+          <td class="good">Zero accuracy loss; compensated by σ-gate</td>
+        </tr>
+        <tr>
+          <td><strong>MQA</strong> (1 KV Head)</td>
+          <td class="r">1</td>
+          <td class="r">1,024 B</td>
+          <td class="r">4.29 GB</td>
+          <td class="bad">Measurable reasoning degradation</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Rotary positions: from 1D RoPE to 3D MRoPE</h3>
+  <p>Before MRoPE comes RoPE itself. Rotary Position Embedding encodes position not by adding a bias but by <em>rotating</em> each query and key. The 256-dim head is split into 128 dim-pairs, and pair $j$ at token position $m$ is rotated by angle $m \cdot \omega_j$, where the frequencies $\omega_j = 10^{7 \cdot (-2j/d_{\text{rot}})}$ range from slow (long-wavelength, capturing distant structure) to fast (short-wavelength, capturing local order). The decisive property is that the query–key inner product after rotation depends only on the <em>relative</em> position $m_q - m_k$, not on either absolute position: rotating both vectors by their positions makes their dot product a function of the angle between them. This is why RoPE extrapolates — a model trained at 32k can still attend coherently at 262k, because the relative-position geometry is unchanged.</p>
+  <p>One-dimensional RoPE has a single position index $m$, which is fine for text but breaks for images and video. A pixel at row $h$, column $w$ in frame $t$ does not have a single natural 1D position; forcing it onto one flattens the 2D/3D structure the model needs to reason about. Multimodal RoPE (MRoPE) solves this by splitting the rotary dim-pairs into three disjoint sections and rotating each section by an <em>independent</em> position axis. The config <code>mrope_section: [11, 11, 10]</code> assigns 11 dim-pairs to the temporal axis $t$, 11 to the height axis $h$, and 10 to the width axis $w$ — 32 pairs in total, i.e. 64 of the 256 head dimensions, matching the partial rotary ratio of 0.25.</p>
+  <p>The three axes cooperate to place any modality on one position space. A text token has a temporal position and a trivial spatial one, so it rotates mainly along the $t$ section. An image patch has a row and column, so it rotates along the $h$ and $w$ sections with $t$ held fixed. A video frame's patches rotate along all three. Because the sections are disjoint, the axes never interfere: the $h$-rotation of an image patch is identical whether the patch is in frame 1 or frame 100, which is what lets one position embedding serve text, images, and video without retraining. The remaining 192 dims stay position-independent, so content similarity is not entirely overwritten by positional structure. The dial below shows the per-pair rotation this produces.</p>
+
+  <!-- Widget 2: 3D MRoPE Phase Visualizer (#w-rope) -->
+  <div class="widget" id="w-rope">
+    <div class="w-head"><span class="w-title">3D MRoPE phase angle &amp; frequency visualizer</span><span class="w-tag">rotary geometry</span></div>
+    <div class="w-desc">Rotary Position Embeddings rotate query/key pairs by angle $\theta_j = 10^{7 \cdot (-2j/d_{\text{rot}})}$. Only 64 of the 256 head dimensions rotate (partial rotary factor 0.25), divided into $[11, 11, 10]$ interleaved pairs across Temporal ($T$), Height ($H$), and Width ($W$) axes.</div>
+    
+    <div class="w-controls">
+      <div class="w-ctl">
+        <label for="ropePos">token position index (m)</label>
+        <input type="range" id="ropePos" min="0" max="512" step="1" value="64">
+      </div>
+      <div class="w-ctl">
+        <label for="ropeDim">rotary dim-pair index (j = 0..31)</label>
+        <input type="range" id="ropeDim" min="0" max="31" step="1" value="0">
+      </div>
+      <div class="w-ctl">
+        <label for="mropeAxis">MRoPE spatial-temporal axis</label>
+        <select id="mropeAxis">
+          <option value="time" selected>Section 1: Temporal Axis T (11 pairs)</option>
+          <option value="height">Section 2: Vertical Axis H (11 pairs)</option>
+          <option value="width">Section 3: Horizontal Axis W (10 pairs)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="widget-visual">
+      <svg id="ropeSvg" viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dial showing the rotation angle of RoPE dim-pair j at token position m"></svg>
+    </div>
+    <div class="fig-cap"><b>Fig. 2</b> — MRoPE rotation dial: dim-pair j at position m receives a phase θ = m·ωⱼ, with the section (T/H/W) determining which frequency band it draws from.</div>
+    <div class="w-out" id="ropeOut" aria-live="polite"></div>
+  </div>
+
+  <h3>The output σ-gate: filtering before the residual write</h3>
+  <p>Equation (7) is the "Gated" in Gated Attention, and it sits between the softmax retrieval and the residual stream. The attention output $\text{Attn}(Q,K,V)$ is element-wise multiplied by $\sigma(x W_g)$ <em>before</em> the output projection $W_o$ adds it back into the stream. The gate is a per-channel scalar in $(0,1)$ computed from the layer's input $x$, so it is data-dependent, not a fixed mask. When the retrieved context is relevant, the gate opens toward $1$ and the attention output passes through to the residual; when the retrieved context is irrelevant or noisy, the gate falls toward $0$ and the attention contribution is suppressed before it can pollute the stream.</p>
+  <p>This is the mechanism that lets the model run only 4 KV heads without losing quality. Aggressive KV-head reduction (GQA-4) saves the cache but means each retrieval reads a coarser shared representation, which can surface loose matches; the σ-gate discards those loose matches at the output rather than letting them propagate. In effect the gate gives each attention layer a learned on/off switch for its own contribution — a layer that finds nothing useful for the current token can near-silence itself, contributing almost nothing to the residual, while a layer that retrieves a key fact passes it through at full strength. That is the "compensated by σ-gate" note in the GQA table, and it is what closes the quality gap to full MHA at a sixth of the cache cost.</p>
+
+  <!-- Widget 3: Output Sigmoid Gate Noise Filtering (#w-attn-gate) -->
+  <div class="widget" id="w-attn-gate">
+    <div class="w-head"><span class="w-title">Learned output σ-gate &amp; attention noise suppressor</span><span class="w-tag">gate dynamics</span></div>
+    <div class="w-desc">The output sigmoid gate $\sigma(x W_g)$ attenuates retrieved context before down-projection into the residual stream: when retrieved material is irrelevant or noisy, gate values fall toward zero and suppress those activations.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="attnGateModeSeg" role="group" aria-label="Attention gating mode">
+        <button data-gate="active" class="on" aria-pressed="true">Relevant Context (Gate Open σ = 0.94)</button>
+        <button data-gate="filtered" aria-pressed="false">Noisy Distractor Context (Gate Clamped σ = 0.08)</button>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="attnGateVisual" aria-live="polite"></div>
+  </div>
+
+  <p>The 16 Gated Attention layers are the backbone's exact-retrieval path: GQA-4 keeps their cache servable at 17.18 GB, MRoPE lets them position text and vision on one axis, and the σ-gate ensures their contributions are signal, not noise. But attention only routes information between positions — it does not change what a position can <em>represent</em>. That transformation is the job of the FFN, which sits in every one of the 64 layers and is the subject of §06: the 17,408-wide SwiGLU that holds the majority of the model's parameters, and the Pre-RMSNorm residual bus that the mixer and FFN both write into.</p>
+</section>

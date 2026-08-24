@@ -1,0 +1,731 @@
+<!-- ============================================================ 06 FFN + RESIDUAL -->
+<section id="ffn">
+  <div class="sec-tag">06 · FFN &amp; the residual stream</div>
+  <h2>Where 62% of parameters and 71% of arithmetic reside</h2>
+  <p class="lead">Every one of the 64 hybrid layers terminates with an identical SwiGLU Feed-Forward Network (FFN) of intermediate width $d_{ff} = 17,408$. Carrying 17.11 billion parameters, the FFN blocks form the primary factual associative storage of the network, reading from and writing to a 5,120-dimensional pre-norm residual communication bus.</p>
+
+  <h3>The FFN as a per-position key–value memory</h3>
+  <p>The labor division established in §03 is exact: the <em>mixer</em> (DeltaNet or attention) moves information <em>across</em> positions — it never looks at two tokens through the same matrix; the <em>FFN</em> transforms each position <em>independently</em>, with no knowledge of its neighbours. A 5,120-vector $\mathbf{x}_l$ arrives at the FFN, and a new 5,120-vector leaves, one token at a time, through three matrices that are shared across all positions but applied per-token. Where the mixer answers "what does this token <em>know about</em>?", the FFN answers "what does this token <em>mean</em>, given what it now carries?"</p>
+  <p>The clearest way to read eq.(8) is not as a nonlinear MLP but as an <em>associative memory</em> in the sense of Geva et al. Reshape the up-projection as $17,408$ row-vectors $\mathbf{k}_i$ (the $i$-th row of $W_{\text{up}}$) and the down-projection as $17,408$ column-vectors $\mathbf{v}_i$ (the $i$-th column of $W_{\text{down}}$). Each hidden unit $i$ computes a scalar address $a_i = \mathbf{x} \cdot \mathbf{k}_i$, passes it through an activation, and votes $\mathbf{v}_i$ into the output:</p>
+  <div class="math" aria-label="FFN read as a key-value memory: each of the 17408 hidden units is a (key, value) pair; the input dot-products against the key, the activation gates the vote, and the values sum back to d_model.">
+    \text{FFN}(\mathbf{x}) = \sum_{i=1}^{17,408} \mathbf{v}_i \cdot \phi\!\left(\mathbf{x} \cdot \mathbf{k}_i\right) \quad \text{with } \phi = \text{SwiGLU gate},\; \mathbf{k}_i \in \mathbb{R}^{5120},\; \mathbf{v}_i \in \mathbb{R}^{5120}
+  </div>
+  <p>This is why the FFN, not the mixer, holds the network's <em>factual</em> storage: each $(\mathbf{k}_i, \mathbf{v}_i)$ pair is a memory slot that fires when the incoming residual stream matches its key, contributing its value to the bus. With $17,408$ slots per layer and $64$ layers, that is $1.11$ million independent memory records — the substrate on which facts are stored during pretraining and recalled at inference. The mixer's job is to deliver the right $\mathbf{x}$ to the right layer so the right slots fire.</p>
+  <p>The intermediate width $d_{ff} = 17,408 \approx 3.4 \cdot d_{\text{model}}$ is the network's single largest capacity lever. Unlike head counts or layer depth, it scales storage <em>and</em> per-token compute linearly, and it is where the bulk of the 27.58 B parameters actually live. The classic transformer uses a $4\times$ expansion; Qwen 3.8 uses $3.4\times$ because — as the next subsection shows — the SwiGLU gate recovers enough expressivity per unit that a smaller multiple suffices, saving parameters that are instead spent on the 64-layer depth and the 5,120-wide bus.</p>
+
+  <!-- SwiGLU Mathematical Derivation -->
+  <div class="math" aria-label="Equation 8: SwiGLU FFN. Output is the down projection of the elementwise product of the gate projection and SiLU of the up projection. Gate and up weight matrices are 5120 by 17408, down is 17408 by 5120; d_ff is 17408 (about 3.4 times d_model, rounded to a multiple of 256), giving 267 million FFN parameters per layer and 17.11 billion over 64 layers.">
+    \text{FFN}(x) = \left( (x W_{\text{gate}}) \odot \text{SiLU}(x W_{\text{up}}) \right) W_{\text{down}} \quad \text{where } \text{SiLU}(z) = z \cdot \sigma(z)&nbsp;&nbsp;<span class="eq-no">(8)</span><br>
+    W_{\text{gate}}, W_{\text{up}} \in \mathbb{R}^{5120 \times 17408} \quad ; \quad W_{\text{down}} \in \mathbb{R}^{17408 \times 5120} \quad ; \quad d_{ff} = 17,408 \approx 3.4 \cdot d_{\text{model}} \;\; (\text{rounded to a multiple of } 256)<br>
+    \text{Params / Layer} = 3 \times (5,120 \times 17,408) = 267.39\text{M} \implies 64 \text{ Layers} = \mathbf{17.11\text{B Parameters}}
+  </div>
+
+  <h3>Why SwiGLU: a gate per unit kills the dead-unit problem</h3>
+  <p>To see what eq.(8) buys over a plain activation, walk down the ladder of FFN transfer functions that Fig. 3 plots. A <strong>ReLU</strong> unit fires as $\max(0, \mathbf{x}\cdot\mathbf{k}_i)$: the unit is either fully on or fully off, and once its pre-activation $\mathbf{x}\cdot\mathbf{k}_i$ is pushed negative by gradient updates, it receives zero gradient and dies permanently — a wasted memory slot. <strong>GELU</strong> and <strong>SiLU</strong> ($z\sigma(z)$) soften this: the transition through zero is smooth, so a "barely off" unit still leaks a small gradient and can recover. But in all three, the on/off decision is a fixed function of the <em>same</em> dot product that produces the value — the unit cannot be silenced for one input and active for another that happens to land at the same address.</p>
+  <p>The Gated Linear Unit (GLU) breaks this coupling by introducing a <em>second</em> projection, the gate. Instead of $\phi(\mathbf{x}\cdot\mathbf{k}_i)\,\mathbf{v}_i$ with a fixed $\phi$, SwiGLU computes</p>
+  <div class="math" aria-label="SwiGLU unit i: the gate projection x·g_i decides how much value v_i contributes, independently of the up projection x·k_i that sets the magnitude. SiLU is applied to the up branch.">
+    \text{unit}_i(\mathbf{x}) = \underbrace{(\mathbf{x}\cdot\mathbf{g}_i)}_{\text{gate } \in \mathbb{R}} \;\cdot\; \underbrace{\text{SiLU}(\mathbf{x}\cdot\mathbf{k}_i)}_{\text{value } \in \mathbb{R}} \;\cdot\; \mathbf{v}_i
+  </div>
+  <p>Now the on/off decision and the value magnitude come from <em>different</em> directions in the 5,120-dim input space: the gate vector $\mathbf{g}_i$ is learned independently of the key $\mathbf{k}_i$. A unit can be wide-open for inputs that match $\mathbf{k}_i$ but gated off for inputs that match $\mathbf{g}_i$ in a conflicting direction — a data-dependent, second-order filter that no fixed activation can express. Because the gate is its own $5120 \times 17408$ matrix, this expressivity costs one extra projection (the third in eq.(8)), which is the price SwiGLU pays and the reason the expansion ratio can drop from $4\times$ to $3.4\times$ without losing capacity.</p>
+  <p>Two consequences fall out of this gating. First, dead units largely disappear: even when $\mathbf{x}\cdot\mathbf{k}_i < 0$ would silence a ReLU slot, the gate $\mathbf{x}\cdot\mathbf{g}_i$ can still route a non-zero contribution, so the gradient through $\mathbf{k}_i$ and $\mathbf{g}_i$ rarely vanishes simultaneously. Second, the per-unit output is now a product of two input-dependent scalars, so the FFN can represent multiplicative interactions between features — something a plain MLP can only approximate wastefully through its width. The activation explorer below sweeps $x$ and shows the resulting non-monotonic, self-gated transfer surface.</p>
+
+  <!-- Widget 1: Interactive SwiGLU Activation Explorer (#w-ffn) -->
+  <div class="widget" id="w-ffn">
+    <div class="w-head"><span class="w-title">SwiGLU gating dynamics &amp; activation transfer explorer</span><span class="w-tag">activation physics</span></div>
+    <div class="w-desc">Continuous transfer functions of ReLU, GELU, and SiLU alongside the gated SwiGLU unit $(x W_{\text{gate}}) \odot \text{SiLU}(x W_{\text{up}})$: smooth, non-monotonic channel filtering across 17,408 hidden units, plotted for a swept input activation $x$.</div>
+    
+    <div class="widget-visual">
+      <svg id="ffnSvg" viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Plot of ReLU, GELU, SiLU activation curves plus a gated SiLU-unit transfer function"></svg>
+    </div>
+    <div class="fig-cap"><b>Fig. 3</b> — Activation transfer functions: ReLU (hard zero), GELU (smooth Gaussian-gated), and SiLU (self-gated z·σ(z)) alongside the SwiGLU unit output (x W_gate) ⊙ SiLU(x W_up).</div>
+    <div class="w-controls">
+      <div class="w-ctl" style="flex:1">
+        <label for="ffnX">input activation magnitude (x ∈ [-6.0, +6.0])</label>
+        <input type="range" id="ffnX" min="-6" max="6" step="0.1" value="0">
+      </div>
+    </div>
+    <div class="w-out" id="ffnOut" aria-live="polite"></div>
+  </div>
+
+  <!-- Widget 2: Residual Bus Communication & RMSNorm Variance Tracker (#w-residual-bus) -->
+  <div class="widget" id="w-residual-bus">
+    <div class="w-head"><span class="w-title">Residual bus signal propagation &amp; RMSNorm variance tracker</span><span class="w-tag">signal propagation</span></div>
+    <div class="w-desc">Activation propagation through the 64-layer residual communication bus: Pre-RMSNorm arbitration holds stream variance at ≈1.0 across all 48 DeltaNet and 16 Attention updates, while an unnormalized stream diverges exponentially.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="resBusNormSeg" role="group" aria-label="RMSNorm bus mode">
+        <button data-mode="prenorm" class="on" aria-pressed="true">Pre-RMSNorm Bus Arbitration (Stable Var ≈ 1.0 · Active)</button>
+        <button data-mode="unnormed" aria-pressed="false">Unnormalized Stream (Exponential Explosion Bug)</button>
+      </div>
+    </div>
+
+    <div class="loss-display" style="margin-top:var(--s-3)">
+      <div class="loss-plot-wrap">
+        <svg id="resBusSvg" viewBox="0 0 560 220" role="img" aria-label="Residual stream variance growth across 64 layers"></svg>
+      </div>
+      <div class="fig-cap"><b>Fig. 4</b> — Residual bus variance across 64 layers: Pre-RMSNorm keeps the stream at var ≈ 1.0; an unnormalized stream diverges exponentially after ~20 layers.</div>
+      <div class="loss-stats" id="resBusStats" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <h3>The 17.11 billion: where the parameters actually live</h3>
+  <p>Before the FLOP table, account for the parameters themselves — every figure in Table 5 falls out of one multiplication. Each FFN holds three matrices: the gate $W_{\text{gate}}$, the up $W_{\text{up}}$, and the down $W_{\text{down}}$. The first two lift the 5,120-dim bus up to the 17,408-wide hidden store; the third projects it back down. In BF16, that is</p>
+  <div class="math" aria-label="Per-layer FFN parameter count: three projections of 5120 by 17408 each, giving 267.39 million per layer and 17.11 billion over 64 layers — 62 percent of the 27.58B total.">
+    \underbrace{3 \times (5{,}120 \times 17{,}408)}_{\text{gate + up + down}} = 267.39\text{M / layer} \;\;\xrightarrow{\times 64}\;\; 17.11\text{B} \;=\; 62.1\% \text{ of } 27.58\text{B}
+  </div>
+  <p>Three observations worth holding onto. <em>(i)</em> The extra gate matrix is the SwiGLU tax: a vanilla 2-matrix FFN of the same width would cost $178.3$M/layer; SwiGLU's third projection adds $89.1$M, and in return buys the per-unit gating that lets the width shrink from $4\times$ to $3.4\times$ — a net parameter win. <em>(ii)</em> The width $17,408$ is rounded to a multiple of $256$ for the same Tensor-Core MMA-tile reason as the vocabulary padding in §02: a $256$-wide tile keeps the down-projection's GEMM dimensions clean on Hopper/Blackwell, so the "wasted" $17,408 - 17,408$-ish slots are not waste but alignment headroom. <em>(iii)</em> Because the FFN is the only sub-layer present on <em>all 64</em> layers (the mixers split 48/16), its per-layer parameter mass dominates the total: $267$M $\times$ $64$ swamps the mixers' $83.9$M $\times$ $48$ and $104.9$M $\times$ $16$ combined, which is the structural reason the FFN is both the factual store <em>and</em> the arithmetic center.</p>
+
+  <!-- FLOP Accounting Breakdown -->
+  <h3>Arithmetic FLOP accounting across the forward pass</h3>
+  <p>Per token, per layer, matrix multiplication FLOPs equal $2 \times \text{parameters}$. In Qwen 3.8, arithmetic is heavily dominated by FFN tensor-core operations:</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 5 — Per-token FLOP accounting:</strong> sub-layer parameter count, MACs/token/layer, 64-layer share of total FLOPs, and hardware bottleneck across the 64-layer forward pass.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Sub-Layer Component</th>
+          <th scope="col" class="r">Parameters / Layer</th>
+          <th scope="col" class="r">MACs / Token / Layer</th>
+          <th scope="col" class="r">Total 64-Layer Compute</th>
+          <th scope="col">Hardware Bottleneck</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>SwiGLU FFN</strong> (All 64 Layers)</td>
+          <td class="r">267.4M</td>
+          <td class="r hl">267.4M MACs</td>
+          <td class="r good"><strong>71.0% of total FLOPs</strong></td>
+          <td>Tensor Core Compute Bound</td>
+        </tr>
+        <tr>
+          <td><strong>Gated DeltaNet Mixer</strong> (48 Layers)</td>
+          <td class="r">83.9M</td>
+          <td class="r">83.9M MACs</td>
+          <td class="r">16.7% of total FLOPs</td>
+          <td>Associative State Memory Bandwidth</td>
+        </tr>
+        <tr>
+          <td><strong>Gated Attention Mixer</strong> (16 Layers)</td>
+          <td class="r">104.9M</td>
+          <td class="r">104.9M MACs</td>
+          <td class="r">7.0% of total FLOPs</td>
+          <td>FlashAttention SRAM Memory Bound</td>
+        </tr>
+        <tr>
+          <td><strong>Untied LM Head</strong> (Final Layer)</td>
+          <td class="r">1.27B</td>
+          <td class="r">1.27B MACs</td>
+          <td class="r">5.3% of total FLOPs</td>
+          <td>HBM Bandwidth (Amortized by MTP)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- RMSNorm Mathematical Formalism -->
+  <h3>RMSNorm bus arbitration &amp; QK-normalization</h3>
+  <div class="math" aria-label="Equations 9 and 10: RMSNorm divides x by the root mean square of its elements, then multiplies by a learned 5120-dim per-channel gain. The residual block updates x by adding the mixer output on the first norm and the FFN output on the second norm.">
+    \text{RMSNorm}(\mathbf{x}) = \frac{\mathbf{x}}{\sqrt{\frac{1}{d} \sum_{i=1}^d x_i^2 + \epsilon}} \odot \boldsymbol{\gamma} \quad \text{where } \boldsymbol{\gamma} \in \mathbb{R}^{5120} \text{ is a learned per-channel gain}&nbsp;&nbsp;<span class="eq-no">(9)</span><br>
+    \mathbf{x}_{l+1} = \mathbf{x}_l + \text{Mixer}\left(\text{RMSNorm}_1(\mathbf{x}_l)\right) + \text{FFN}\left(\text{RMSNorm}_2(\mathbf{x}_l)\right)&nbsp;&nbsp;<span class="eq-no">(10)</span>
+  </div>
+
+  <h3>Pre-RMSNorm: why the bus stays at variance 1</h3>
+  <p>Eq.(10) is the bus from §01 made concrete, and its <em>pre</em>-norm placement is the single most load-bearing micro-decision in the architecture. Read the two clauses carefully: $\text{RMSNorm}_1$ and $\text{RMSNorm}_2$ sit <em>inside</em> the mixer and FFN arguments, not outside. The sub-layers never see the raw residual $\mathbf{x}_l$; they see a normalized <em>view</em> of it, while the un-normalized $\mathbf{x}_l$ is the thing that accumulates.</p>
+  <p>Contrast this with <em>post</em>-norm, $\mathbf{x}_{l+1} = \text{RMSNorm}(\mathbf{x}_l + \text{Mixer}(\mathbf{x}_l))$. There the norm applied <em>after</em> the residual add rescales the whole stream each layer, so early-layer signal gets progressively shrunk and gradients through the deep stack become unstable — the divergence the "Unnormalized Stream" toggle in the variance tracker above dramatizes, but post-norm has its own failure mode where the norm fights the residual. <em>Pre</em>-norm separates the two concerns: the residual stream is free to grow (it is a sum, not a normalised quantity), while every sub-layer reads a unit-scale input and therefore produces a unit-scale output regardless of depth. Each layer contributes a depth-controlled increment; the bus is a running sum of bounded updates rather than a recursively re-scaled vector.</p>
+  <p>The arithmetic behind the widget's stable line is direct. RMSNorm divides by the root-mean-square, so the normalized vector has RMS exactly $1$ (before the learned gain $\boldsymbol{\gamma}$). If a sub-layer's output magnitude is roughly independent of its input magnitude — true for both the $\sigma$-gated attention and the gated SwiGLU, whose gates re-normalize large inputs — then each residual update adds a term of bounded variance, and the stream's variance grows roughly linearly with depth, not exponentially:</p>
+  <div class="math" aria-label="Variance growth under pre-norm: each layer adds a bounded-variance increment, so the stream grows linearly with depth rather than exponentially. The learned gamma rescales per channel; without pre-norm the increments compound.">
+    \text{Var}(\mathbf{x}_{l+1}) \;\approx\; \text{Var}(\mathbf{x}_l) + c \;\;\Rightarrow\;\; \text{Var}(\mathbf{x}_L) \approx L \cdot c \quad \text{(pre-norm, linear in depth)}, \qquad \text{Var}(\mathbf{x}_L) \sim c^{L} \quad \text{(unnormalized, exponential)}
+  </div>
+  <p>This is why the tracker shows the unnormalized stream blowing past usable dynamic range around layer 20 — $c^{20}$ for even a modest per-layer gain $c > 1$ is already catastrophic — while the pre-norm line holds at $\text{var} \approx 1$ across all 64. The learned per-channel gain $\boldsymbol{\gamma} \in \mathbb{R}^{5120}$ is the one knob RMSNorm keeps from full LayerNorm: it lets each channel re-scale after normalization, recovering any deliberate anisotropy (some channels should carry more signal than others) without re-introducing the depth instability. RMSNorm drops LayerNorm's <em>mean subtraction</em> because the residual stream is approximately zero-mean by symmetry of the sub-layer outputs, so centering adds compute and a stat that is nearly constant — a small but real saving repeated $129$ times.</p>
+  <p>The bus is the same 5,120-dimensional channel introduced in §01; here it acquires its traffic rules. Each of the 64 layers is a pair of <em>parallel</em> readers of the normalized stream — the mixer reads $\text{RMSNorm}_1(\mathbf{x}_l)$ and routes across positions, the FFN reads $\text{RMSNorm}_2(\mathbf{x}_l)$ and transforms per-position — and both write back additively. Because both readers see the same normalized input and write to the same bus, the mixer and FFN never contend: the mixer decides which positions' vectors arrive at the FFN's slots, the FFN decides what those slots return to the bus, and the residual sum composes the two without interference. The 129 RMSNorms are the arbiters that keep this traffic at unit scale; QK-Norm does the same job inside attention, holding the $256$-dim dot-product logits in a bounded softmax regime so the §05 $\sigma$-gate sees well-scaled probabilities rather than saturated ones.</p>
+
+  <p>There are exactly <strong>129 RMSNorms</strong> in the core backbone: two per layer (pre-mixer and pre-FFN across 64 layers = 128) plus the final pre-LM head norm. Additionally, QK-Norm inside all 16 attention layers keeps dot-product logits $(q^T k / \sqrt{d_k})$ inside a bounded softmax regime, preventing gradient explosions during large-batch pretraining. With the bus stabilised and the FFN's 17.11 B parameters seated as the factual store, the remaining question is how non-text modality enters that bus — which is the vision front-end of §07.</p>
+</section>
+
+<!-- ============================================================ 07 VISION -->
+<section id="vision">
+  <div class="sec-tag">07 · Vision front-end &amp; multimodal projection</div>
+  <h2>How continuous pixels become discrete 5,120-dimensional tokens</h2>
+  <p class="lead">Qwen 3.8 is natively multimodal from the ground up: a SigLIP-style Vision Transformer (ViT) converts images and high-fps video frames into dense patch embeddings, a 2-layer MLP projector aligns visual geometry with the language model's 5,120-dim residual stream, and 3D MRoPE assigns spatial-temporal coordinates $[T, H, W]$. Roughly 333 weight tensors (~0.9B parameters) comprise the visual front-end.</p>
+
+  <h3>The five-stage bridge, from continuous pixels to the residual bus</h3>
+  <p>The backbone built in §§03–06 is a discrete-token machine: it understands only one currency, a 5,120-dimensional vector on the residual bus, addressed by the FFN's 1.11 M key–value slots and routed by the §05 attention. An image, by contrast, is a continuous two-dimensional field of RGB triples — it has no tokens, no position indices, and no native address on that bus. The vision front-end is the translator that converts one into the other, and its five stages are best read as a single contraction: <em>pixels → patches → patch features → merged features → bus-native tokens</em>, with dimension changing $3 \to 1{,}536 \to 1{,}536 \to 6{,}144 \to 5{,}120$ and token count falling by $4\times$ at the merge.</p>
+  <p>Each stage hands off to the next on a clean interface. <strong>Patchify</strong> turns a grid of pixels into a sequence of patch tokens — the vision analogue of §02's token-embedding lookup, lifting raw input into the first feature space. <strong>SigLIP ViT</strong> runs the same self-attention machinery as §05 over those patch tokens, producing features that carry semantics rather than raw color. <strong>2×2 Merge</strong> compresses four neighbouring patch features into one, trading sub-pixel acuity for a $4\times$ token-count cut. <strong>MLP Project</strong> is the single dimension-changing step — the only place the 1,536-dim vision space is mapped onto the 5,120-dim bus. <strong>MRoPE Splice</strong> attaches the 3D $[T,H,W]$ coordinates from §05 and interleaves the result into the text token stream. After stage 5, a vision token is, to the backbone, indistinguishable from a text token: same bus, same FFN slots, same attention, same MRoPE — which is the whole point of a native multimodal design.</p>
+  <p>The widget below lets you click through the five stages; the prose that follows unpacks the mechanism behind each one, beginning with the patchify step that every later stage depends on.</p>
+
+  <!-- Interactive 5-Stage Patch-to-Residual Pipeline (#w-vision-pipe) -->
+  <div class="widget" id="w-vision-pipe">
+    <div class="w-head"><span class="w-title">Interactive 5-stage vision-to-language transformation pipeline</span><span class="w-tag">multimodal pipeline</span></div>
+    <div class="w-desc">The five stages of the multimodal front-end: an input image or video frame is decomposed, encoded, spatially compressed, and interleaved into the language model's residual stream. Click a stage for its detail card.</div>
+    
+    <div class="pipe" id="visionPipe">
+      <div class="stage active" data-stage="1">
+        <div class="st-num">STAGE 1</div>
+        <div class="st-name">Patchify</div>
+        <div class="st-desc">14×14 px conv kernel → 256 patches per 224px tile</div>
+      </div>
+      <div class="stage" data-stage="2">
+        <div class="st-num">STAGE 2</div>
+        <div class="st-name">SigLIP ViT</div>
+        <div class="st-desc">Transformer encoder → ℝ^(N × 1536) patch features</div>
+      </div>
+      <div class="stage" data-stage="3">
+        <div class="st-num">STAGE 3</div>
+        <div class="st-name">2×2 Merge</div>
+        <div class="st-desc">Spatial 2×2 neighbor concat → 4× token reduction</div>
+      </div>
+      <div class="stage" data-stage="4">
+        <div class="st-num">STAGE 4</div>
+        <div class="st-name">MLP Project</div>
+        <div class="st-desc">2-layer MLP → ℝ^5120 matching LM residual bus</div>
+      </div>
+      <div class="stage" data-stage="5">
+        <div class="st-num">STAGE 5</div>
+        <div class="st-name">MRoPE Splice</div>
+        <div class="st-desc">3D [T, H, W] coordinates &amp; token interleaving</div>
+      </div>
+    </div>
+
+    <div class="funnel-detail-card" id="visionDetailCard" aria-live="polite" style="margin-top:var(--s-3)"></div>
+  </div>
+
+  <h3>Patchify: a strided convolution is a per-patch linear projection</h3>
+  <p>Stage 1 is a single convolutional layer with a $14 \times 14$ kernel, stride $14$, lifting $3$ input channels to $1{,}536$ output channels. Read it mechanically: the kernel slides over the image in non-overlapping $14 \times 14$ blocks, and at each placement it takes the $14 \cdot 14 \cdot 3 = 588$ pixel values inside the window, flattens them, and multiplies by a $588 \to 1{,}536$ weight matrix. That is — point for point — a linear projection of one image patch into a $1{,}536$-dim embedding vector, implemented as a convolution purely because a conv expresses "apply this same projection to every spatial window" in one fused Tensor-Core kernel. A $224 \times 224$ tile thus yields $(224/14)^2 = 16^2 = 256$ patch tokens, each a $1{,}536$-vector. Higher resolutions are handled by tiling the image into $224$-px blocks and processing each tile, then concatenating — the <em>native-resolution</em> approach that lets a 4K diagram produce tens of thousands of patches without retraining the ViT at that scale.</p>
+  <p>This is the direct vision analogue of §02's token embedding. There, a discrete token id $x_t \in \{0, \dots, 248319\}$ indexes a row of a $248320 \times 5120$ embedding table — a lookup. Here, a continuous $588$-vector patch is multiplied by a $588 \times 1536$ matrix — a projection. Both lift raw input into the first feature space their respective towers consume; the only difference is that text input is discrete (so a lookup suffices) and image input is continuous (so a linear map is required). After patchify, the image is no longer pixels — it is a sequence of $256$ tokens on a $1{,}536$-dim channel, ready for the same transformer machinery that processes text.</p>
+
+  <!-- Widget 2: Vision Token Economics & Context Budget Calculator (#w-vision-calc) -->
+  <div class="widget" id="w-vision-calc">
+    <div class="w-head"><span class="w-title">Multimodal token economics &amp; context budget calculator</span><span class="w-tag">token economics</span></div>
+    <div class="w-desc">Exact token counts, VRAM embedding footprint, and context-budget consumption for high-resolution document screenshots, UI images, and multi-frame video inputs.</div>
+    
+    <div class="calc-ctl">
+      <div class="w-ctl">
+        <label for="visPresetSel">modality / resolution preset</label>
+        <select id="visPresetSel">
+          <option value="224x224x1">Standard Tile (224 × 224 px · 1 image)</option>
+          <option value="800x600x1" selected>Web Screenshot (800 × 600 px · 1 image)</option>
+          <option value="1920x1080x1">1080p Document / Slide (1920 × 1080 px · 1 image)</option>
+          <option value="3840x2160x1">4K High-Res Diagram (3840 × 2160 px · 1 image)</option>
+          <option value="448x448x16">Short Video Clip (448 × 448 px · 16 frames)</option>
+          <option value="640x360x64">Long Video Sequence (640 × 360 px · 64 frames)</option>
+        </select>
+      </div>
+      <div class="w-ctl">
+        <label for="visMergeToggle">2×2 spatial patch merge</label>
+        <select id="visMergeToggle">
+          <option value="true" selected>Enabled (4× Token Compression · Default)</option>
+          <option value="false">Disabled (Raw 14×14 Patches)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="calc-readout" id="visCalcReadout" aria-live="polite"></div>
+  </div>
+
+  <h3>The SigLIP ViT: attention over patches, the same recipe as §05</h3>
+  <p>Once patchify has produced a sequence of $1{,}536$-dim tokens, the ViT tower encodes them with $30$ layers of self-attention — $16$ heads, $d_v = 1{,}536$, MLP width $6{,}144$ ($4\times$ expansion, the classic ratio, since the ViT predates the SwiGLU parameter-saving of §06). The mechanism is identical to §05's Gated Attention: query/key/value projections, softmax over patch positions, a residual bus, Pre-RMSNorm. The only differences are the working dimension ($1{,}536$ not $5{,}120$), the position system (learned 2D patch-position embeddings rather than MRoPE, since within the ViT every token is an image patch with a fixed grid coordinate), and the absence of the GQA/MRoPE machinery that the multimodal bus requires. In other words, vision and text use the <em>same</em> mixer once input has been lifted into token space; the front-end's entire job is to get pixels into that space and then align it to the LLM's bus.</p>
+  <p>The ViT's $849.6$ M parameters — the overwhelming bulk of the $0.9$ B visual front-end — are spent exactly where §06 predicted they would be: in the per-layer FFN (here a $4\times$-expanded MLP, $30$ layers of $1536 \times 6144$ projections), with the attention projections a small minority. The same FFN-as-associative-memory reading applies: the ViT's slots store visual primitives — edges, textures, object parts, OCR glyphs — that fire when a patch's features match their keys. By layer 30 the output is a sequence of semantic feature vectors, one per patch, that no longer resemble pixels.</p>
+
+  <!-- SigLIP Loss Mathematics -->
+  <h3>Sigmoid contrastive pretraining (the "S" in SigLIP)</h3>
+  <p>Standard CLIP models train vision-text pairs with a global softmax normalization across batch size $B$. This creates a severe synchronization bottleneck in multi-GPU distributed clusters because every negative sample competes in a shared denominator. SigLIP replaces global softmax with independent pairwise sigmoid binary classification losses:</p>
+
+  <div class="math">
+    L_{\text{SigLIP}} = -\sum_{i=1}^B \sum_{j=1}^B \log \sigma\left(z_{ij} \cdot (2 \cdot \mathbf{1}[i=j] - 1)\right) \quad \text{where } z_{ij} = \frac{t_i^T v_j}{\tau} - b&nbsp;&nbsp;<span class="eq-no">(11)</span><br>
+    \tau \text{ (learned temperature)}, \; b \text{ (learned bias)}; \quad \text{No global denominator} \implies \mathcal{O}(1) \text{ communication scaling}
+  </div>
+
+  <p>The mechanism is easier to see by contrasting the two losses term by term. CLIP's InfoNCE loss for pair $i$ is $-\log \frac{\exp(t_i^T v_i / \tau)}{\sum_{j=1}^B \exp(t_i^T v_j / \tau)}$: a softmax whose denominator sums over every other pair $j$ in the batch. That denominator is the bottleneck — to compute it correctly, every GPU must contribute its local pairs to a global allgather, so batch size $B$ is bounded by inter-GPU communication, not by how much data you have. SigLIP replaces the single $B$-way softmax with $B^2$ independent binary decisions: for each $(i, j)$ pair, compute $z_{ij} = t_i^T v_j / \tau - b$ and apply a sigmoid, treating matching pairs $(i=j)$ as positives (target $+1$) and mismatched pairs $(i \ne j)$ as negatives (target $-1$):</p>
+  <div class="math" aria-label="One SigLIP pair term: a sigmoid binary logistic on the cosine-similarity of a text and image embedding, positive for matched pairs and negative for mismatched pairs. No global denominator, so no cross-GPU allgather is needed.">
+    \ell_{ij} = -\log \sigma\!\left(z_{ij} \cdot y_{ij}\right), \quad y_{ij} = 2\cdot\mathbf{1}[i=j] - 1 \in \{-1, +1\} \;\;\Rightarrow\;\; L_{\text{SigLIP}} = \sum_{i,j} \ell_{ij}
+  </div>
+  <p>Because each $\ell_{ij}$ depends only on pair $(i,j)$ and not on any global sum, no allgather is required — the loss decomposes across GPUs, and batch size can grow to $32{,}000+$ pairs per step limited only by device memory. The learned bias $b$ shifts the decision boundary so the sigmoid is not pinned at $0.5$ when cosines are near zero, and the learned temperature $\tau$ controls how sharply the similarity comparison gates. A second, subtler benefit: in CLIP each negative is only a fractional pressure inside one softmax, so a single hard negative barely registers; in SigLIP each negative is its own full-strength binary decision, so fine-grained distinctions (a zebra vs a horse, an uppercase O vs a zero) get a complete gradient signal — the mechanism behind the richer OCR and spatial semantics.</p>
+
+  <p>SigLIP therefore scales to global batches of 32k+ pairs per step, yielding visual representations with significantly richer spatial and fine-grained OCR semantics than CLIP.</p>
+
+  <!-- 2x2 Merge & Projector Mechanics -->
+  <h3>The 2×2 spatial merge &amp; MLP projector</h3>
+  <div class="math">
+    \text{Concat}\left(\mathbf{v}_{2h, 2w}, \mathbf{v}_{2h+1, 2w}, \mathbf{v}_{2h, 2w+1}, \mathbf{v}_{2h+1, 2w+1}\right) \in \mathbb{R}^{4 \cdot d_v = 6,144}<br>
+    \mathbf{h}_{\text{vision}} = \text{Linear}_{6144 \to 5120}\left(\text{SiLU}\left(\text{Linear}_{6144 \to 6144}(\mathbf{v}_{\text{merged}})\right)\right) \in \mathbb{R}^{5,120}
+  </div>
+
+  <p>Spatial merging trades sub-pixel acuity for a $4\times$ reduction in sequence length—transforming a 10,764-token 1080p frame into a 2,691-token payload that the hybrid backbone ingests at thousands of tokens per second.</p>
+
+  <p>Read the two projector lines as a single dimensional handoff. The merger concatenates four neighbouring $1{,}536$-vectors into a $6{,}144$-vector — this is <em>not</em> a learned operation, just a spatial reshape that says "treat a $2 \times 2$ block of patches as one super-patch." The MLP projector then does the only dimension change in the whole front-end: a SwiGLU-style 2-layer MLP $6{,}144 \to 6{,}144 \to 5{,}120$, landing the merged feature exactly on the residual bus from §06. After this projection the vision token is bus-native: the backbone's attention will route it, its FFN slots will fire on it, and the §05 MRoPE will position it, exactly as if it were a text token. That is why the projector, at $69.2$ M parameters, is tiny compared with the ViT but structurally the most important component in the tower — it is the bridge from the vision's $1{,}536$-dim channel onto the LLM's $5{,}120$-dim bus, and the place where "vision feature" becomes "token the backbone can reason about."</p>
+  <p>The token-budget arithmetic the calculator above runs is one multiplication of patchify and one division of merge. Raw patch tokens for an input are $(W/14) \times (H/14) \times T_{\text{frames}}$; the $2 \times 2$ merge then divides by $4$ (modulo tile-boundary rounding):</p>
+  <div class="math" aria-label="Vision token budget: patches are width over 14 times height over 14 times frames; the 2x2 merge divides by 4. A 1080p single frame gives about 2691 bus-native tokens, which is the context-budget cost of one image.">
+    N_{\text{tokens}} = \frac{1}{4} \cdot \left\lceil \tfrac{W}{14} \right\rceil \left\lceil \tfrac{H}{14} \right\rceil \cdot T \quad \Rightarrow \quad 1080\text{p frame: } \tfrac{\lceil 1920/14\rceil \times \lceil 1080/14\rceil}{4} = \tfrac{138 \times 78}{4} = 2{,}691 \text{ bus tokens}
+  </div>
+  <p>Each of those tokens costs the same context budget as a text token — a $5{,}120$-dim slot in the $262{,}144$-token window — so a single 1080p screenshot consumes about $2.7$ k of context, a 4K diagram about $10.7$ k, and a 64-frame video proportionally more. This is the resolution-versus-context tradeoff the calculator makes explicit: the front-end can ingest arbitrarily high resolution, but every $14 \times 14$ patch is eventually paid for in the backbone's attention FLOPs and KV cache, so the $2 \times 2$ merge is the lever that keeps rich visual input from crowding out the text reasoning around it.</p>
+  <p>The final stage — MRoPE splice — attaches coordinates and interleaves. Image patches receive a $[T, H, W]$ triple with $T = 0$ and $(H, W)$ set to their grid position; video frames vary $T$ by frame index. This is precisely what §05's MRoPE was built for: its three disjoint $[11,11,10]$ rotary sections give vision tokens independent $H$ and $W$ axes that text tokens leave at zero, so the two modalities share one position space without collision. The splice then drops the vision tokens into the text stream at the position of the <code>&lt;image&gt;</code> / <code>&lt;video&gt;</code> sentinel — after which the backbone has a single, mixed-modality sequence to route and transform.</p>
+
+  <!-- Visual Tower Parameter Breakdown Table -->
+  <h3>Visual tower component accounting</h3>
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 6 — Visual-tower component accounting:</strong> patch conv, ViT blocks, 2×2 merger, MLP projector — parameter counts and functional role for each stage.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Visual Component</th>
+          <th scope="col">Dimension / Architecture</th>
+          <th scope="col" class="r">Parameters</th>
+          <th scope="col">Functional Role</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Patch Convolution</strong></td>
+          <td>Kernel $14 \times 14$, Stride 14, 3 $\to$ 1,536 channels</td>
+          <td class="r">0.90M</td>
+          <td>Linearly projects $14\times 14$ RGB pixel patches into ViT embedding space.</td>
+        </tr>
+        <tr>
+          <td><strong>SigLIP ViT Tower</strong></td>
+          <td>30 layers, 16 heads, $d_v = 1,536$, MLP dim 6,144</td>
+          <td class="r">849.6M</td>
+          <td>Extracts high-level semantic, structural, and OCR features across patches.</td>
+        </tr>
+        <tr>
+          <td><strong>2×2 Merge &amp; Projector</strong></td>
+          <td>2-layer MLP with SiLU: $\mathbb{R}^{6,144} \to \mathbb{R}^{5,120}$</td>
+          <td class="r">69.2M</td>
+          <td>Compresses spatial token count by $4\times$ and aligns geometry with LM residual stream.</td>
+        </tr>
+        <tr>
+          <td><strong>Total Visual Front-End</strong></td>
+          <td>~333 weight tensors</td>
+          <td class="r good"><strong>≈0.9B</strong></td>
+          <td>Patch conv + ViT blocks + merger/projector; active only on visual token ingestion. Components sum to 919.7M, carried as ≈0.9B in the parameter budget.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The $0.90 + 849.6 + 69.2 = 919.7\text{M} \approx 0.9\text{B}$ accounting has one structural footnote: the visual front-end is <em>conditionally active</em>. Unlike the backbone, which fires on every token, these $333$ weight tensors only execute when the input contains an <code>&lt;image&gt;</code> or <code>&lt;video&gt;</code> sentinel — for a pure-text request they sit idle in HBM, costing VRAM but zero FLOPs. This is why a $0.9$ B vision tower is affordable on a model whose FFN alone is $17.11$ B: it is a detachable peripheral, not a always-on component, and the §12 inference optimizations can keep it resident or swap it depending on whether the request is multimodal. With pixels now resident on the bus as first-class tokens, the remaining structural question is how the backbone is trained to look ahead more than one token at a time — the Multi-Token Prediction heads of §08.</p>
+</section>
+
+<!-- ============================================================ 08 MTP -->
+<section id="mtp">
+  <div class="sec-tag">08 · Multi-Token Prediction &amp; speculative decoding</div>
+  <h2>Dual-purpose multi-future supervision and zero-overhead drafting</h2>
+  <p class="lead">Qwen 3.8 trains with native Multi-Token Prediction (MTP) heads integrated directly into the backbone. During pretraining, MTP provides dense multi-step credit assignment that deepens associative memory retention across DeltaNet layers; at inference, those same heads emit candidate draft tokens for free, accelerating autoregressive generation by 1.8×–2.4× without requiring a secondary draft model.</p>
+
+  <h3>Why look ahead? The one-token horizon problem</h3>
+  <p>A purely next-token language model — eq.(12) alone — has a structural mismatch between how it is trained and how it is used. At training time the backbone's hidden state $\mathbf{h}_t$ receives a gradient signal from exactly one loss term, the prediction of $x_{t+1}$. It is therefore optimised to encode "what comes next," a one-token horizon. At inference time, however, that same $\mathbf{h}_t$ must support a long coherent continuation: every token from $t+1$ onward is generated by re-reading the growing context, but the quality of those generations is bounded by how much lookahead $\mathbf{h}_t$ was pressured to encode during training. The model is never explicitly trained to <em>plan</em> beyond one step.</p>
+  <p>MTP closes that gap by supervising $\mathbf{h}_t$ against several futures at once. With $K=2$ auxiliary heads, the same hidden state is asked to predict $x_{t+1}$ (the main head), $x_{t+2}$ (head 1), and $x_{t+3}$ (head 2) simultaneously. The gradient now flows back from three targets through three heads, so $\mathbf{h}_t$ is pressured to carry information useful for a two-token lookahead, not merely a one-token guess. For the 48 DeltaNet layers this is especially load-bearing: their recurrent state $S_t$ (§04) is an associative memory that must remain <em>retrievable</em> for $K$ future positions, so the multi-future loss forces $S_t$ to store durable, multi-step structure rather than a single ephemeral prediction. This is the "dense credit assignment" benefit made precise — denser supervision, shorter gradient paths, and a state trained to age well.</p>
+
+  <!-- Mathematical Formalism of MTP -->
+  <h3>The multi-future training objective</h3>
+  <p>Standard autoregressive language models optimize only next-token cross-entropy $L_{\text{LM}}$. MTP augments this with $K$ auxiliary prediction heads ($K=2$ in Qwen 3.8), each predicting future tokens $x_{t+1+k}$ conditioned on the backbone's final hidden state $h_t$ and embedded prior drafts:</p>
+
+  <div class="math">
+    L_{\text{LM}} = -\sum_{t=1}^T \log P(x_{t+1} \mid x_{\le t})&nbsp;&nbsp;<span class="eq-no">(12)</span><br>
+    L_{\text{MTP}, k} = -\sum_{t=1}^T \log \hat{P}_k(x_{t+1+k} \mid x_{\le t}, \tilde{x}_{t+1 \dots t+k}) \quad \text{for } k \in \{1, \dots, K\}&nbsp;&nbsp;<span class="eq-no">(13)</span><br>
+    L_{\text{total}} = L_{\text{LM}} + \sum_{k=1}^K \lambda_k L_{\text{MTP}, k} \quad \text{where } \lambda_k \in [0.1, 0.4] \text{ annealed during curriculum}
+  </div>
+
+  <p>This yields two benefits: (1) <strong>Dense Credit Assignment:</strong> Backpropagation flows simultaneously from $x_{t+1}, x_{t+2}, x_{t+3}$, shortening gradient path lengths and forcing the 48 DeltaNet layers to maintain associative states $S_t$ that remain valid across multi-token lookaheads. (2) <strong>Zero-Overhead Speculation:</strong> At runtime, the depth-1 MTP heads generate candidate tokens in the same forward step as the main model, completely eliminating the parameter and VRAM overhead of separate draft models.</p>
+
+  <h3>The cascade: how $K$ heads share one hidden state</h3>
+  <p>The $K$ MTP heads are not $K$ independent predictors; they form a serial cascade that reuses the backbone's $\mathbf{h}_t$ and the shared $248{,}320$-token embedding. The main LM head produces $P(x_{t+1} \mid \mathbf{h}_t)$. Head $k$ produces $P(x_{t+1+k} \mid \mathbf{h}_t, \tilde{x}_{t+1}, \dots, \tilde{x}_{t+k})$ — it is conditioned on the <em>embeddings of the tokens already drafted</em> by the shallower heads, which is what the $\tilde{x}$ symbols in eq.(13) denote. During training these drafts are <em>teacher-forced</em> to the ground-truth tokens, so each head learns the conditional distribution of its future token given the true prefix; during inference they are the argmax outputs of the previous head, chained forward. Because every head taps the same $\mathbf{h}_t$ and the same embedding table, the only <em>new</em> parameters are the $K$ projection matrices — the $+2.4\%$ per head that the telemetry card reports ($+4.8\% \approx 1.32$ B for $K=2$, $\sim 2.6$ GB in BF16), with zero extra vocabulary or embedding cost.</p>
+
+  <h3>The draft–verify–accept cycle, step by step</h3>
+  <p>At inference the MTP heads convert one forward pass into $K+1$ candidate tokens, which the target model then verifies in a <em>single</em> parallel pass. The cycle is:</p>
+  <p><strong>(1) Draft.</strong> A forward pass over the current prefix produces $\mathbf{h}_t$. The main head emits the root token $x_{t+1}$; MTP head 1, reading $\mathbf{h}_t$ and the embedding of $x_{t+1}$, emits draft $\tilde{x}_{t+2}$; head 2, reading $\mathbf{h}_t$ and the embeddings of $x_{t+1}, \tilde{x}_{t+2}$, emits draft $\tilde{x}_{t+3}$. The $K+1$ tokens are appended to the sequence as a speculative extension.</p>
+  <p><strong>(2) Verify.</strong> One forward pass over the $K+1$-token extension scores <em>all</em> positions in parallel, under a 2D tree causal mask (Fig. 5b) that lets each position attend only to its causal ancestors and not to speculative siblings. The target model thus produces its own argmax at each of the $K+1$ positions in the time it takes to run one pass — not $K+1$ sequential passes.</p>
+  <p><strong>(3) Accept-and-resample.</strong> Walk the extension left to right and accept the longest prefix where the draft's token equals the target's argmax. At the first divergence, discard the remainder and resample that single position from the <em>target's</em> distribution. Advance the context by (accepted tokens $+ 1$), and repeat.</p>
+  <p>The speedup lives in step 2. Autoregressive generation is memory-bandwidth-bound: the dominant cost per token is reading the $1.27$ B-parameter untied LM head from HBM to produce one distribution (the §01 "MTP amortizes LM-head bandwidth" note). By verifying $K+1$ tokens in one pass, MTP amortises that HBM read across $K+1$ candidates, so the bandwidth-bound head — the inference bottleneck identified in Table 5 — is paid once per $K+1$ tokens rather than once per token. The verification pass itself is compute-heavier (it scores $K+1$ positions), but on memory-bound consumer GPUs the bandwidth saving dominates, which is why the wall-clock gain is $1.8$–$2.4\times$ rather than the naive $K+1$.</p>
+  <p>The tree mask is what makes branching speculative decoding possible. A linear chain mask treats the drafts as one serial continuation; a branching tree mask (beam $2$ in Fig. 5b) lets each head propose multiple alternative tokens, arranged so position $i$ attends only to its ancestors. The mask matrix $M_{i,j} = 0$ if $j$ is an ancestor of $i$ and $-\infty$ otherwise — an asymmetric triangular block structure that evaluates every branch of the speculative tree concurrently in a single self-attention computation, with no cross-pollination between sibling hypotheses. The widget below lets you toggle between the linear chain and the branching tree to see how the mask restructures.</p>
+
+  <!-- Widget 1: Interactive Speculative Decoding Simulator (#w-mtp) -->
+  <div class="widget" id="w-mtp">
+    <div class="w-head"><span class="w-title">Live MTP speculative decoding &amp; speedup simulator</span><span class="w-tag">speculative engine</span></div>
+    <div class="w-desc">The draft-verify-resume cycle in real time: the model emits $K$ draft tokens per forward pass and the target verifies all drafts in a single parallel step. Green marks accepted speculative drafts; red marks rejected tails; amber marks the resampled target correction token.</div>
+    
+    <div class="w-controls">
+      <button class="w-btn primary" id="mtpStep">Step</button>
+      <button class="w-btn" id="mtpAuto" aria-label="Auto-run speculative decoding cycles">Play ▶</button>
+      <button class="w-btn" id="mtpReset">Reset</button>
+      
+      <div class="w-ctl">
+        <label for="mtpDomainSel">domain acceptance preset (β)</label>
+        <select id="mtpDomainSel">
+          <option value="0.88" selected>Structured JSON / Code AST (β = 0.88 · ~2.3× speedup)</option>
+          <option value="0.78">Standard Python / TypeScript (β = 0.78 · ~1.9× speedup)</option>
+          <option value="0.55">Creative Natural Language (β = 0.55 · ~1.4× speedup)</option>
+        </select>
+      </div>
+
+      <div class="w-ctl">
+        <label for="mtpK">draft heads depth (K)</label>
+        <select id="mtpK">
+          <option value="1">K = 1 draft token / pass</option>
+          <option value="2" selected>K = 2 draft tokens / pass (Native 3.8)</option>
+          <option value="3">K = 3 draft tokens / pass</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="mtp-row" id="mtpRow"></div>
+    <div class="w-out" id="mtpOut" aria-live="polite"></div>
+  </div>
+
+  <!-- Widget 2: Interactive MTP Drafting & Single-Pass Verification Flow (#w-mtp-tree) -->
+  <div class="widget" id="w-mtp-tree">
+    <div class="w-head"><span class="w-title">MTP architectural layout &amp; single-pass verification tree</span><span class="w-tag">tree verification</span></div>
+    <div class="w-desc">How MTP structures draft heads and executes parallel causal verification: instead of sequential drafting passes, the target model verifies the root token and all proposed drafts simultaneously in a single forward pass under a unified 2D causal tree mask.</div>
+    
+    <div class="w-controls">
+      <div class="seg" id="mtpViewSeg" role="group" aria-label="MTP exploration views">
+        <button data-view="arch" class="on" aria-pressed="true">Architecture &amp; Dataflow</button>
+        <button data-view="mask" aria-pressed="false">2D Tree Causal Mask</button>
+        <button data-view="verif" aria-pressed="false">Parallel Verification Cycle</button>
+      </div>
+
+      <div class="w-ctl">
+        <label for="mtpTreeDepth">draft depth (K)</label>
+        <select id="mtpTreeDepth">
+          <option value="1">K = 1 (2 tokens / pass · +2.4% params)</option>
+          <option value="2" selected>K = 2 (Native Qwen 3.8 · 3 tokens / pass · +4.8% params)</option>
+          <option value="3">K = 3 (Deep lookahead · 4 tokens / pass · +7.2% params)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="mtp-tree-layout">
+      <div class="mtp-tree-visual-col">
+        <!-- View 1: Architecture SVG -->
+        <div class="mtp-view-panel" id="mtpPanelArch">
+          <div class="mtp-svg-wrap">
+            <svg id="mtpTreeSvg" viewBox="0 0 680 290" role="img" aria-label="MTP architectural forward pass and draft tree diagram"></svg>
+          </div>
+          <div class="fig-cap"><b>Fig. 5</b> — MTP forward+verify architecture: $K$ draft heads propose $K+1$ candidate continuations; the target model scores the root token and all candidate draft tokens simultaneously in a single forward pass under a unified causal-mask tree. Click any component above to inspect its tensor contract.</div>
+        </div>
+
+        <!-- View 2: 2D Tree Causal Mask -->
+        <div class="mtp-view-panel" id="mtpPanelMask" style="display:none;">
+          <div class="mtp-mask-wrap">
+            <div class="mtp-mask-matrix-view">
+              <div class="mtp-mask-grid-head">
+                <span class="mtp-mask-title">Attention Mask Matrix $M_{i,j}$ ($-\infty$ / $0$)</span>
+                <div class="seg sm" id="mtpMaskTopologySeg" role="group" aria-label="Mask topology">
+                  <button data-topo="chain" class="on" aria-pressed="true">Linear Speculative Chain</button>
+                  <button data-topo="tree" aria-pressed="false">Branching Tree (Beam 2)</button>
+                </div>
+              </div>
+              <div class="mtp-mask-table-wrap" id="mtpMaskTableWrap"></div>
+            </div>
+            <div class="mtp-mask-legend">
+              <div class="mask-legend-row">
+                <span class="mask-legend-chip allowed">1.0 / 0 dB</span>
+                <span><strong>Causal Attention Allowed</strong> — Token attends to self or causal ancestors.</span>
+              </div>
+              <div class="mask-legend-row">
+                <span class="mask-legend-chip masked">0.0 / -∞</span>
+                <span><strong>Causal Attention Masked</strong> — Prevents illegal future leakage or sibling interference.</span>
+              </div>
+            </div>
+          </div>
+          <div class="fig-cap"><b>Fig. 5b</b> — 2D Tree Attention Causal Mask: By constructing an asymmetric triangular block mask, all $K+1$ speculative positions are evaluated concurrently in one self-attention computation without cross-pollinating alternative speculative branches.</div>
+        </div>
+
+        <!-- View 3: Single-Pass Verification Cycle -->
+        <div class="mtp-view-panel" id="mtpPanelVerif" style="display:none;">
+          <div class="mtp-verif-wrap">
+            <div class="mtp-verif-bar">
+              <div class="verif-prompt-box">
+                <span class="verif-label">PREFIX CONTEXT:</span>
+                <span class="verif-text" id="mtpVerifPromptText"><code>def compute_attention_scores(q, k, v):</code></span>
+              </div>
+              <button class="w-btn primary sm" id="mtpVerifStepBtn">Simulate Step ⚡</button>
+            </div>
+            <div class="mtp-verif-candidates" id="mtpVerifCandidates"></div>
+            <div class="mtp-verif-comparison" id="mtpVerifComparison"></div>
+          </div>
+          <div class="fig-cap"><b>Fig. 5c</b> — Single-pass parallel verification cycle: All $K+1$ tokens are scored in parallel by the target backbone. The sequence is accepted up to the first divergence, where the target model resamples the correction token.</div>
+        </div>
+      </div>
+
+      <!-- Right Column: Telemetry & Dynamic Inspector Card -->
+      <div class="mtp-tree-info-col">
+        <div class="rf-stat-box">
+          <div class="rf-head">MTP Execution &amp; Memory Contract</div>
+          <div class="rf-row"><span>Extra Parameter Weight</span><span class="val mint" id="mtpStatWeight">+4.8% (~2.6 GB)</span></div>
+          <div class="rf-row"><span>Draft Verification Latency</span><span class="val" id="mtpStatLatency">1 Forward Pass</span></div>
+          <div class="rf-row"><span>Shared LM Head Vocab</span><span class="val" id="mtpStatVocab">248,320 (0 extra params)</span></div>
+          <div class="rf-row"><span>Target Output Distribution</span><span class="val mint" id="mtpStatDist">Exact Match (KL = 0.0)</span></div>
+        </div>
+
+        <div class="mtp-inspector-card" id="mtpInspectorCard">
+          <div class="inspector-header">
+            <span class="inspector-badge" id="mtpInspectBadge">LAYER COMPONENT</span>
+            <span class="inspector-title" id="mtpInspectTitle">Main Backbone Layer 64</span>
+          </div>
+          <div class="inspector-math" id="mtpInspectMath">h_t = RMSNorm(Block₆₄(h_t⁽⁶³⁾)) ∈ ℝ^(B × 1 × 5120)</div>
+          <div class="inspector-body" id="mtpInspectDesc">Computes the deep contextual representation for the current token position. The resulting hidden state $h_t$ is simultaneously dispatched to the Shared LM Head and the cascade of MTP draft heads.</div>
+          <div class="inspector-props" id="mtpInspectProps">
+            <div class="ip-item"><span class="ip-lbl">TENSOR SHAPE</span><span class="ip-val" id="mtpInspectShape">[Batch, 1, 5120]</span></div>
+            <div class="ip-item"><span class="ip-lbl">PRECISION</span><span class="ip-val" id="mtpInspectDtype">bfloat16 (Layer 64)</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mathematical Acceptance Guarantee -->
+  <h3>Acceptance-rate mathematics &amp; exact distribution preservation</h3>
+  <p>A critical mathematical guarantee of speculative decoding is that the output distribution is <strong>provably identical</strong> to standard greedy or nucleus autoregressive sampling from the target model. Draft proposals can only accelerate generation; they can never alter the output probabilities or introduce draft-model hallucinations:</p>
+
+  <div class="math">
+    \mathbb{E}[\text{Tokens Accepted per Verification Step}] = \frac{1 - \beta^{K+1}}{1 - \beta} \quad ; \quad \text{Speedup Factor } \mathcal{S} \approx \frac{\mathbb{E}[\text{Tokens}]}{1 + \gamma_{\text{verify}}}
+  </div>
+
+  <p>For $K=2$ draft heads at $\beta = 0.85$, the model accepts an expected $\mathbf{2.57\text{ tokens per forward pass}}$, translating to a net $>2.2\times$ wall-clock throughput increase on consumer GPUs where memory bandwidth is the primary bottleneck.</p>
+
+  <p>The $\frac{1 - \beta^{K+1}}{1 - \beta}$ expression is a finite geometric series, and it falls straight out of the accept-and-resample rule. The root token $x_{t+1}$ is the main head's own output, so it is always correct — that is the leading $1$. Draft $\tilde{x}_{t+2}$ is accepted with probability $\beta$ (the chance the draft matches the target's argmax), contributing $\beta$. Draft $\tilde{x}_{t+3}$ is accepted only if <em>both</em> it and the draft before it match, contributing $\beta^2$, and so on. Summing the expected contributions of the root and the $K$ drafts gives</p>
+  <div class="math" aria-label="Expected accepted tokens as a finite geometric series: root always accepted (1), draft k accepted with probability beta^k, sum 1+beta+...+beta^K = (1-beta^{K+1})/(1-beta).">
+    \mathbb{E}[\text{accepted}] = \sum_{k=0}^{K} \beta^k = 1 + \beta + \beta^2 + \dots + \beta^K = \frac{1 - \beta^{K+1}}{1 - \beta}
+  </div>
+  <p>Plugging the three domain presets (with $K=2$) recovers the simulator's speedup tiers exactly: structured code ($\beta = 0.88$) gives $(1 - 0.88^3)/0.12 = 2.66 \to \sim 2.3\times$ after the verification-pass overhead; standard code ($\beta = 0.78$) gives $2.39 \to \sim 1.9\times$; creative text ($\beta = 0.55$) gives $1.85 \to \sim 1.4\times$. The $\gamma_{\text{verify}}$ term in the speedup factor is the wall-clock cost of the single verification pass relative to a generation step — small on bandwidth-bound hardware, which is why $\mathcal{S}$ tracks $\mathbb{E}[\text{tokens}]$ closely there and sags on compute-bound servers.</p>
+  <p>The "exact distribution preservation" guarantee — the $\text{KL} = 0.0$ in the telemetry card — is a consequence of step 3, not a separate mechanism. Accepted drafts are, by definition, tokens where the draft's choice <em>equals</em> the target's argmax, so they are samples the target would have produced anyway. At the first divergence the correction token is resampled from the <em>target's</em> full distribution, not the draft's, so the marginal distribution of every emitted token is exactly the target's $P(x_{t+1} \mid x_{\le t})$. Drafts can only accelerate; they can never inject their own probabilities, which is why a wrong draft is silently discarded rather than corrupting the output — the Leviathan et al. rejection-sampling guarantee that makes speculative decoding distribution-safe.</p>
+
+  <!-- MTP vs Separate Draft Model Comparison Matrix -->
+  <h3>Native MTP vs separate draft model comparison</h3>
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 7 — Native MTP heads vs separate draft model:</strong> VRAM footprint, draft-target distribution match, training cost, and acceptance-rate behavior compared head-to-head.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Architectural Dimension</th>
+          <th scope="col">Native MTP Heads (Qwen 3.8-27B)</th>
+          <th scope="col">Separate Small Draft Model (e.g. 1.5B Model)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>VRAM Memory Footprint</strong></td>
+          <td class="r good"><strong>+4.8% parameter overhead</strong> (~2.6 GB BF16)</td>
+          <td class="r bad">+20% to +35% VRAM (+3–6 GB weights + KV cache)</td>
+        </tr>
+        <tr>
+          <td><strong>KV Cache Synchronization</strong></td>
+          <td class="r good"><strong>Zero extra KV cache</strong>; shares main backbone tables</td>
+          <td class="r bad">Requires separate KV cache management &amp; synchronization</td>
+        </tr>
+        <tr>
+          <td><strong>Vocabulary &amp; Embedding Alignment</strong></td>
+          <td class="r good"><strong>100% Shared LM Head</strong> ($248,320$ vocabulary)</td>
+          <td class="r">Often suffers tokenizer discrepancies or embedding drift</td>
+        </tr>
+        <tr>
+          <td><strong>Latency per Draft Token</strong></td>
+          <td class="r good"><strong>Near-zero latency</strong> (Single fused linear projection)</td>
+          <td class="r bad">Full forward pass latency across small draft model layers</td>
+        </tr>
+        <tr>
+          <td><strong>Training Regularization Payoff</strong></td>
+          <td class="r good"><strong>Improves base model reasoning</strong> via multi-step loss</td>
+          <td class="r">Zero training benefit to the target foundation model</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Each row of Table 7 is a consequence of the MTP heads living <em>inside</em> the backbone rather than beside it. The shared $248{,}320$-vocabulary LM head (§02) means drafts are produced in the exact token space the target reasons in — no tokenizer drift, no embedding misalignment, which is the single largest source of acceptance-rate collapse in separate-draft setups. The shared KV cache means the verification pass reuses the backbone's already-materialised keys and values rather than maintaining a second cache that must be synchronised token-by-token. And the training-regulariser row is the asymmetry that makes MTP structurally superior: a separate draft model is a pure inference tax with zero benefit to the foundation model, whereas the MTP multi-step loss is paid during pretraining for a backbone that is <em>more</em> capable at single-token generation too — the dense credit assignment of §08's first subsection makes the base model better, and the drafting capability is a free by-product. The cost is the $+4.8\%$ parameter overhead, carried only at inference and shed when MTP is disabled for non-speculative serving.</p>
+  <p>With the architecture's forward path, multimodal ingress, and training-time lookahead all specified, the remaining input to the model is the one no amount of architecture can compensate for: the data it is trained on. The §09 pipeline turns $120$ PB of raw web into the $36$ T tokens that fill the FFN's memory slots and the MTP heads' futures.</p>
+</section>
+
+<!-- ============================================================ 09 DATA -->
+<section id="data">
+  <div class="sec-tag">09 · Data pipeline &amp; synthesis</div>
+  <h2>From 120 petabytes of raw web to 36 trillion clean tokens</h2>
+  <p class="lead">A 27.6B-parameter hybrid model demands high-quality data at scale: 36 trillion tokens spanning 119 natural and programming languages, with ≈39% synthetically amplified through automated verifier loops. This section details the ingestion funnel, deduplication mathematics, model-in-the-loop synthesis, and sequence packing protocols.</p>
+
+  <h3>The funnel: 120 PB of raw web, distilled to 36 T tokens</h3>
+  <p>Read the pipeline as a chain of <em>lossy filters</em>, each removing one specific failure mode. The numbers in the widget above are not arbitrary volumes but the survivors of the previous stage's filter, and the retention ratios tell you where the data actually comes from:</p>
+  <div class="math" aria-label="Data funnel retention: 120 PB raw crawl to 45 PB parsed text (37.5 percent, markup/OCR strip), to 22 T organic tokens (dedup/quality/decontam), plus 14 T verifier-gated synthetic, equals 36 T final. Synthetic share 14/36 = 38.9 percent.">
+    \underbrace{120\text{ PB}}_{\text{raw crawl}} \xrightarrow[\text{strip + OCR}]{0.375} \underbrace{45\text{ PB}}_{\text{parsed text}} \xrightarrow[\text{dedup + quality + decontam}]{} \underbrace{22\text{ T}}_{\text{organic}} \;+\; \underbrace{14\text{ T}}_{\text{synthetic}} = \underbrace{36\text{ T}}_{\text{pretraining shards}}, \quad \tfrac{14}{36} = 38.9\%
+  </div>
+  <p>Stage 1 harvests $120$ PB of raw web — Common Crawl, books, code repositories, PDFs, and image sets — most of it duplicate, spam, SEO boilerplate, or non-text. Stage 2 strips HTML markup and runs OCR over images and PDFs to extract $45$ PB of parsed text (a $37.5\%$ retention; the discarded bytes are image data and markup, the latter routed separately to the §07 vision tower). Stage 3 is the highest-leverage cut: deduplication, quality classification, language identification, and decontamination reduce $45$ PB of parsed text to $22$ T <em>organic</em> tokens — the human/web portion. Stage 4 adds $14$ T of verifier-gated synthetic data (Table 8) to fill capability gaps the organic corpus under-covers, and Stage 5 packs the $36$ T total into fixed-length training shards. The $39\%$ synthetic share is not a budget target but the output of a generate-versus-verify tradeoff: synthesis is cheap to produce and expensive to verify, so $14$ T is where the verification budget saturated.</p>
+
+  <!-- Metric Badges Strip -->
+  <div class="stat-grid three-up">
+    <div class="stat">
+      <div class="num">36T</div>
+      <div class="lbl">Tokens (Qwen3 Base)</div>
+      <div class="sub">2.0× jump vs Qwen 2.5's 18T</div>
+    </div>
+    <div class="stat">
+      <div class="num">119</div>
+      <div class="lbl">Languages grounded</div>
+      <div class="sub">4.1× jump vs Qwen 2.5's 29</div>
+    </div>
+    <div class="stat">
+      <div class="num">120+ PB</div>
+      <div class="lbl">Raw ingest volume</div>
+      <div class="sub">Compressed to 36T high-density tokens</div>
+    </div>
+  </div>
+
+  <!-- Widget 1: Interactive 5-Stage Ingestion Funnel (#w-data-funnel) -->
+  <div class="widget" id="w-data-funnel">
+    <div class="w-head"><span class="w-title">Live 5-stage data processing &amp; token funnel</span><span class="w-tag">data pipeline</span></div>
+    <div class="w-desc">The end-to-end data pipeline from petabyte-scale web scraping to tokenized pretraining shards: per-stage data volumes, retention ratios, and filtering algorithms. Click any processing stage for its detail card.</div>
+    
+    <div class="funnel-pipeline" id="funnelPipeline">
+      <div class="funnel-step active" data-step="1">
+        <div class="fs-num">01</div>
+        <div class="fs-name">Harvest &amp; Crawl</div>
+        <div class="fs-vol">120+ PB Raw</div>
+      </div>
+      <div class="funnel-step" data-step="2">
+        <div class="fs-num">02</div>
+        <div class="fs-name">Multimodal OCR</div>
+        <div class="fs-vol">45 PB Parsed</div>
+      </div>
+      <div class="funnel-step" data-step="3">
+        <div class="fs-num">03</div>
+        <div class="fs-name">Dedup &amp; Filter</div>
+        <div class="fs-vol">22T Organic</div>
+      </div>
+      <div class="funnel-step" data-step="4">
+        <div class="fs-num">04</div>
+        <div class="fs-name">Model Synthesis</div>
+        <div class="fs-vol">+14T Synthetic</div>
+      </div>
+      <div class="funnel-step" data-step="5">
+        <div class="fs-num">05</div>
+        <div class="fs-name">Packed Shards</div>
+        <div class="fs-vol">36T Sharded</div>
+      </div>
+    </div>
+
+    <div class="funnel-detail-card" id="funnelDetailCard" aria-live="polite"></div>
+  </div>
+
+  <h3>Why deduplication is the highest-leverage filter</h3>
+  <p>The single largest waste in a raw web crawl is <em>repetition</em>: the same article, boilerplate footer, or license text is mirrored across thousands of sites, so a naive corpus is dominated by near-identical copies. Training on duplicates is doubly harmful — it spends FLOPs re-learning what the model already knows, and it biases the §06 FFN's key–value memory toward the duplicated content (the slots that fire on boilerplate get reinforced out of proportion, crowding out rarer, more informative facts). Deduplication removes both failures at once, and because it operates on cheap string signatures rather than expensive model scores, it is the most FLOPs-efficient cut in the funnel — every duplicate token removed is a wasted training FLOP that never runs.</p>
+  <p>The mechanism is MinHash locality-sensitive hashing. Each document is shingled into overlapping $n$-gram windows, each shingle is hashed, and the document is represented by the minimum hashes of $b$ random bands. Two documents sharing a band are near-duplicate candidates; exact-match on the band signatures clusters them without ever comparing documents pairwise (which would be $O(N^2)$ over billions of documents). Near-dup removal also catches <em>template</em> boilerplate — pages that share $80\%$ of their content with a million others — which is the bulk of what Stage 3 discards. Running dedup <em>before</em> the quality classifier matters: it is cheaper to deduplicate cheap data than to first pay a model to score copies you are about to throw away.</p>
+
+  <!-- Widget 2: Dynamic Corpus Mix & Domain Weighting Visualizer (#w-data-mix) -->
+  <div class="widget" id="w-data-mix">
+    <div class="w-head"><span class="w-title">Curriculum domain mix &amp; token weighting explorer</span><span class="w-tag">token mix</span></div>
+    <div class="w-desc">Pretraining domain balance across curriculum stages: Stage 1 focuses on broad world knowledge, Stage 2 shifts heavily to formal reasoning and code, and Stage 3 shifts to long-horizon document sequences.</div>
+    
+    <div class="mix-stage-ctl">
+      <div class="seg" id="mixStageSeg" role="group" aria-label="Curriculum domain stage selector">
+        <button data-stage="s1" class="on" aria-pressed="true">Stage 1: General Foundation (30T)</button>
+        <button data-stage="s2" aria-pressed="false">Stage 2: STEM &amp; Code Reasoning (+5T)</button>
+        <button data-stage="s3" aria-pressed="false">Stage 3: Long-Context 262k (~1T)</button>
+      </div>
+    </div>
+
+    <!-- Visual Stacked Domain Mix Bar -->
+    <div class="mix-bar-wrap">
+      <div class="mix-stacked-bar" id="mixStackedBar">
+        <div class="msb-seg web" id="msbWeb" style="width:35%" title="Web Crawl &amp; Books"></div>
+        <div class="msb-seg code" id="msbCode" style="width:30%" title="Code &amp; Repositories"></div>
+        <div class="msb-seg stem" id="msbStem" style="width:20%" title="STEM &amp; Mathematics"></div>
+        <div class="msb-seg multi" id="msbMulti" style="width:15%" title="Multilingual &amp; Multimodal"></div>
+      </div>
+      <div class="mix-legend">
+        <div class="vl-item"><span class="vl-sw" style="background:var(--sky)"></span>Web &amp; Books</div>
+        <div class="vl-item"><span class="vl-sw" style="background:var(--mint)"></span>Code &amp; Repositories</div>
+        <div class="vl-item"><span class="vl-sw" style="background:var(--amber)"></span>STEM &amp; Mathematics</div>
+        <div class="vl-item"><span class="vl-sw" style="background:var(--iris)"></span>Multilingual &amp; Multimodal</div>
+      </div>
+    </div>
+
+    <div class="mix-stats" id="mixStats" aria-live="polite"></div>
+  </div>
+
+  <h3>The curriculum mix is a schedule, not a ratio</h3>
+  <p>The domain bar above is not a fixed recipe — it is an <em>annealed schedule</em> that shifts across the three pretraining stages, and the shift is the data-side analogue of the MTP $\lambda_k$ annealing in §08. Stage 1 ($30$ T) is broad world knowledge: web and books dominate, because the model must first fill the FFN's memory slots with the long tail of facts, entities, and common-sense associations that later stages will reason over. Stage 2 ($+5$ T) tilts hard toward STEM and code — the bar's code and STEM segments swell — because once the slots exist, the model needs formal-reasoning distributions to learn the multi-step inference (and the §08 multi-future loss) that the organic web under-represents. Stage 3 ($\sim 1$ T) shifts to long-horizon $262$k-token documents, up-weighting sequences that exercise the §03 DeltaNet recurrent state and the §05 262k MRoPE extrapolation at their full length.</p>
+  <p>The principle is the same one that governs §10's loss-temperature annealing: the easiest, broadest distribution is learned first, and the harder, more specialised distributions are introduced only once the base representation is stable. A fixed mix from step one would either starve the reasoning capabilities (if web-heavy) or destabilise early training (if code-heavy before the base facts exist). The schedule lets each capability arrive when the model has the substrate to absorb it — which is why the widget's three stage buttons show three genuinely different bars, not three views of one corpus.</p>
+
+  <!-- Widget 3: Sequence Packing & Boundary Mask Isolation (#w-data-packing) -->
+  <div class="widget" id="w-data-packing">
+    <div class="w-head"><span class="w-title">Best-fit sequence packing &amp; boundary mask inspector</span><span class="w-tag">packing protocol</span></div>
+    <div class="w-desc">Packing multiple documents into fixed-length 4,096 sequences eliminates padding waste (98% fill rate), but requires strict attention mask boundaries and position-ID resets to prevent cross-document memory leakage.</div>
+    
+    <div class="packing-ctl">
+      <div class="seg" id="packingModeSeg" role="group" aria-label="Sequence packing mode">
+        <button data-mode="isolated" class="on" aria-pressed="true">Correct Mask Reset (Isolated Documents)</button>
+        <button data-mode="leaked" aria-pressed="false">Naive Concatenation (Attention Bleed Bug)</button>
+      </div>
+    </div>
+
+    <div class="packing-visual" id="packingVisual" aria-live="polite"></div>
+  </div>
+
+  <h3>Sequence packing: the FLOPs-per-byte lever</h3>
+  <p>Documents have a power-law length distribution — most are short, a few are very long — so naively padding each to a fixed training length wastes roughly half the compute on zeros. Sequence packing eliminates that waste: variable-length documents are sorted and greedily bin-packed into fixed-length sequences (4,096 for the dense pretraining stages, $262{,}144$ for the long-context stage), and best-fit-decreasing packing achieves the $\approx 98\%$ fill rate the widget reports. The arithmetic of the saving is direct — a $98\%$ fill versus a $\sim 50\%$ padded fill is nearly a $2\times$ increase in useful tokens per forward pass, which is a $2\times$ throughput gain at zero model cost, purely from how the data is laid out.</p>
+  <div class="math" aria-label="Sequence packing fill rate: best-fit-decreasing packs variable-length docs into fixed 4096 (or 262k) bins to 98 percent fill, versus ~50 percent with padding — a 2x useful-tokens-per-pass gain at zero model cost.">
+    \text{fill}_{\text{padded}} \sim 50\% \;\to\; \text{fill}_{\text{packed}} \approx 98\% \quad\Rightarrow\quad \text{useful tokens / pass} \;\approx\; 1.96\times
+  </div>
+  <p>Packing introduces one hazard that the widget's two modes dramatise. When documents A and B share a packed sequence, naïve concatenation lets attention from tokens in A read tokens in B — an <em>attention bleed</em> that leaks information across document boundaries and silently degrades the model (it learns spurious cross-document correlations that never exist at inference, where each prompt is one document). The fix reuses the §05 attention-mask mechanism at the data level: reset position IDs at every document boundary and apply a block-diagonal causal mask so each document attends only to itself. The "Correct Mask Reset" mode shows the block-diagonal mask; the "Attention Bleed" mode shows the un-reset case where the mask is a single causal triangle spanning the whole packed sequence. The cost of the fix is a slightly more complex mask construction; the benefit is the $2\times$ throughput <em>and</em> the guarantee that packed training is information-equivalent to single-document training.</p>
+
+  <!-- Model-in-the-Loop Synthesis Table -->
+  <h3>Verifier-guided model-in-the-loop synthesis</h3>
+  <p>The defining innovation of Qwen3's data pipeline is <strong>automated verifier-guided synthesis</strong>: strong models generate missing capability distributions (such as multi-step Olympiad proofs and complex agentic refactors), but synthetic tokens are admitted to training shards <em>only if validated by a deterministic oracle</em>:</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption><strong>Table 8 — Verifier-guided model-in-the-loop synthesis matrix:</strong> domain, artifact type, generator model, verification oracle, and synthetic shard volume per capability axis.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Domain</th>
+          <th scope="col">Synthesized Artifact Type</th>
+          <th scope="col">Generator Model</th>
+          <th scope="col">Verification Oracle</th>
+          <th scope="col" class="r">Synthetic Shard Volume</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Formal Mathematics</strong></td>
+          <td>Step-by-step textbook derivations, Olympiad algebra, geometry lemmas</td>
+          <td>Qwen2.5-Math-72B</td>
+          <td>SymPy Computer Algebra System &amp; Lean 4 formal prover</td>
+          <td class="r good">~4.8 Trillion Tokens</td>
+        </tr>
+        <tr>
+          <td><strong>Systems &amp; Code</strong></td>
+          <td>Repository-level bug fixes, unit tests, docstring implementations</td>
+          <td>Qwen2.5-Coder-32B</td>
+          <td>Docker sandbox unit test execution &amp; AST validation</td>
+          <td class="r good">~5.6 Trillion Tokens</td>
+        </tr>
+        <tr>
+          <td><strong>Agentic Tool Calling</strong></td>
+          <td>Multi-turn bash terminal interactions, error recovery trajectories</td>
+          <td>Qwen3 Teacher Fleet</td>
+          <td>Environment state delta verification &amp; exit-code assertion</td>
+          <td class="r good">~2.2 Trillion Tokens</td>
+        </tr>
+        <tr>
+          <td><strong>Multimodal OCR</strong></td>
+          <td>STEM paper OCR, multi-column tables, inline LaTeX formulas</td>
+          <td>Qwen2.5-VL-72B</td>
+          <td>Layout bounding-box alignment &amp; text perceptual hashing</td>
+          <td class="r">~1.4 Trillion Tokens</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The verifier is the load-bearing column of Table 8, not the generator. Strong models generate candidate synthetic tokens cheaply and at arbitrary scale, but ungated synthetic data is model-flavoured noise — it amplifies the generator's own errors and, trained on at volume, causes the "model collapse" failure where the trained model drifts toward the generator's blind spots. The pipeline admits a synthetic token <em>only</em> if a deterministic oracle independently verifies it, and the oracle is deliberately not a language model: SymPy and Lean 4 check a math derivation by symbolic simplification and formal proof, not by judging whether the steps "look right"; Docker unit tests check code by execution pass/fail; agentic trajectories are checked by environment state-delta and exit-code assertion; OCR by bounding-box alignment and perceptual hashing. A deterministic oracle cannot be reward-hacked the way a model-judging-model verifier can, because there is no soft score to optimise against — the token either satisfies the oracle or it does not. This is why the $14$ T synthetic can be mixed with the $22$ T organic without degrading the base model: every synthetic token has passed a ground-truth check the organic data was never given.</p>
+  <p>The four capability axes in the table are exactly the distributions the organic $22$ T under-covers. Olympiad proofs, repository-level refactors, and multi-turn agentic error-recovery trajectories are rare in web crawl — a web corpus has millions of blog posts but vanishingly few verified step-by-step geometry lemmas. Synthesis closes those gaps: the generator produces the missing distribution, the verifier certifies which examples are correct, and only certified examples enter the shards. The $4.8$ T math, $5.6$ T code, $2.2$ T agentic, and $1.4$ T multimodal-OCR volumes sum to $14$ T, the synthetic term in the funnel equation above.</p>
+
+  <!-- Decontamination & Quality Rigor -->
+  <div class="callout note">
+    <div class="co-title">Decontamination protocol</div>
+    <p>To eliminate test-set memorization, all pretraining shards undergo continuous 13-gram exact match filtering and semantic embedding cosine similarity checks ($>0.85$ threshold) against 40+ public evaluation benchmarks (GSM8K, MATH-500, HumanEval, SWE-bench, LiveCodeBench, etc.). Any training document sharing overlapping spans with evaluation sets is permanently purged from pretraining shards.</p>
+  </div>
+
+  <p>The two decontamination filters catch different failure modes, which is why both are required. The $13$-gram exact match catches <em>verbatim</em> leakage — a training document that reproduces a benchmark problem word-for-word, which the model would memorise into the §06 FFN slots and then "solve" by retrieval rather than reasoning at evaluation time. The cosine-similarity check catches <em>paraphrase</em> leakage — the same problem reworded, which a 13-gram match would miss but a semantic embedding would flag as near-identical. The $>0.85$ threshold is a precision-recall balance: too low and legitimately useful math content that merely resembles a benchmark problem gets purged (false positives starve the curriculum); too high and contaminated rewordings slip through (false negatives inflate the benchmark numbers the §13 results depend on). Purging is permanent and continuous — every new shard is checked against the benchmark set before it reaches a training run, so contamination discovered late in a curriculum cannot have already been learned.</p>
+  <p>With the funnel distilled, the duplicates removed, the curriculum scheduled, the sequences packed, the synthetic gaps verified-closed, and the benchmarks decontaminated, the pipeline has produced $36$ T of training-ready tokens. The §10 pretraining stage now turns those tokens into the $27.58$ B trained weights — the loss schedule, the optimizer, and the compute that fills the architecture's memory slots with what the data contains.</p>
+</section>
