@@ -306,7 +306,7 @@
     <div class="grpo-rollouts-wrap">
       <div class="grpo-rollouts-header">
         <span>Sampled Rollout Group ({y₁ ... y_G})</span>
-        <span id="grpoGroupStats" aria-live="polite" style="font-family:var(--mono);font-size:11px;color:var(--mint)">Mean: 0.00 · Std: 0.00 · Loss J_GRPO: 0.000</span>
+        <span id="grpoGroupStats" aria-live="polite" style="font-family:var(--mono);font-size:12px;color:var(--mint)">Mean: 0.00 · Std: 0.00 · Loss J_GRPO: 0.000</span>
       </div>
       <div class="grpo-rollouts-list" id="grpoRolloutsList" aria-live="polite"></div>
     </div>
@@ -511,10 +511,10 @@
         <span id="vramTotalLabel" style="font-family:var(--mono);font-weight:700;color:var(--fg)">0.0 / 24.0 GB</span>
       </div>
       <div class="vram-stacked-bar" id="vramStackedBar">
-        <div class="vsb-seg weights" id="vsbWeights" style="width:50%" title="Model Weights"></div>
-        <div class="vsb-seg kv" id="vsbKv" style="width:20%" title="GQA KV Cache"></div>
-        <div class="vsb-seg deltanet" id="vsbDeltanet" style="width:5%" title="DeltaNet Recurrent States"></div>
-        <div class="vsb-seg overhead" id="vsbOverhead" style="width:10%" title="CUDA & Activation Overhead"></div>
+        <div class="vsb-seg weights" id="vsbWeights" title="Model Weights"></div>
+        <div class="vsb-seg kv" id="vsbKv" title="GQA KV Cache"></div>
+        <div class="vsb-seg deltanet" id="vsbDeltanet" title="DeltaNet Recurrent States"></div>
+        <div class="vsb-seg overhead" id="vsbOverhead" title="CUDA & Activation Overhead"></div>
       </div>
       <div class="vram-legend">
         <div class="vl-item"><span class="vl-sw" style="background:var(--amber)"></span>Weights</div>

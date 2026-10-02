@@ -113,6 +113,19 @@ function enableTabs(container, itemSel) {
 /* slugify headings → ids used by .anchor links */
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64);
 
+/* stacked-bar segments: absolutely positioned at a running left offset and
+   scaled on the compositor, so the transition never triggers layout */
+function stackSegments(pairs) {
+  let left = 0;
+  for (const [el, pct] of pairs) {
+    if (el) {
+      el.style.left = left + "%";
+      el.style.transform = `scaleX(${pct / 100})`;
+    }
+    left += pct;
+  }
+}
+
 /* ---------- scroll progress + nav scroll state ---------- */
 (function () {
   const bar = $("progress");
@@ -337,7 +350,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       `<div class="row" style="border-top:1px solid var(--line-strong);margin-top:6px;padding-top:10px">
          <span><b>total (LM ${withMtp ? "+ MTP " : ""}${withVision ? "+ vision" : ""})</b></span>
          <span class="big">${fmtP(c.total)}</span></div>` +
-      `<div style="color:var(--faint);font-size:11px;margin-top:8px">checkpoint ≈ ${(c.total * 2 / 1e9).toFixed(1)} GB in BF16</div>`;
+      `<div style="color:var(--faint);font-size:12px;margin-top:8px">checkpoint ≈ ${(c.total * 2 / 1e9).toFixed(1)} GB in BF16</div>`;
     // mirror the headline number to the hero stat card so they never disagree
     const heroEl = document.getElementById("statParams");
     if (heroEl) heroEl.textContent = fmtP(c.total);
@@ -517,7 +530,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       const isControl = t.text.startsWith("<|") || t.text.startsWith("<think") || t.text.startsWith("</think");
       // escape before injecting — token text can contain "<", "&" etc.
       const shown = esc(t.text).replace(/\n/g, "↵").replace(/ /g, "␣");
-      return `<span style="display:inline-block;background:${isControl ? "rgba(43,58,138,0.25)" : color};border:1px solid ${isControl ? "var(--iris)" : "var(--line)"};padding:2px 6px;margin:2px;border-radius:4px;font-family:var(--mono);font-size:11px;color:${isControl ? "var(--iris)" : "var(--fg)"}" title="Token ID: ${t.id}"><b>${shown}</b> <span style="color:var(--faint);font-size:9px">#${t.id}</span></span>`;
+      return `<span style="display:inline-block;background:${isControl ? "rgba(43,58,138,0.25)" : color};border:1px solid ${isControl ? "var(--iris)" : "var(--line)"};padding:2px 6px;margin:2px;border-radius:4px;font-family:var(--mono);font-size:12px;color:${isControl ? "var(--iris)" : "var(--fg)"}" title="Token ID: ${t.id}"><b>${shown}</b> <span style="color:var(--faint);font-size:12px">#${t.id}</span></span>`;
     }).join("");
 
     const idsPreview = data.tokens.map(t => t.id).join(", ");
@@ -543,11 +556,11 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       </div>
 
       <div style="background:var(--bg-2);padding:10px 14px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line);margin-top:8px">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--faint);margin-bottom:6px">Segmented Token Stream (Click token for ID):</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--faint);margin-bottom:6px">Segmented Token Stream (Click token for ID):</div>
         <div style="line-height:1.8">${badgesHtml}</div>
       </div>
 
-      <div style="font-family:var(--mono);font-size:10.5px;color:var(--faint);background:var(--bg-3,var(--bg-2));padding:6px 10px;border-radius:4px;margin-top:8px;overflow-x:auto;white-space:nowrap">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--faint);background:var(--bg-3,var(--bg-2));padding:6px 10px;border-radius:4px;margin-top:8px;overflow-x:auto;white-space:nowrap">
         Token IDs: [ ${idsPreview} ]
       </div>
     `;
@@ -623,7 +636,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     fertStatCard.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:6px">
         <span style="font-family:var(--display);font-size:15px;font-weight:700;color:var(--fg)">${d.name}</span>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--mint);font-weight:600">${d.gain}</span>
+        <span style="font-family:var(--mono);font-size:12px;color:var(--mint);font-weight:600">${d.gain}</span>
       </div>
 
       <div class="calc-stat-grid">
@@ -722,7 +735,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
               <div class="cs-lbl">Cumulative Params (L1..L${i+1})</div>
             </div>
           </div>
-          <div style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+          <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
             ${isDelta
               ? `<b>Linear Attention:</b> 16 QK / 48 V heads × 128 dim · Fixed state $128 \\times 128$ per head (0 Bytes dynamic KV cache). Constant $\\mathcal{O}(1)$ decode FLOPs.`
               : `<b>Full Softmax Attention:</b> 24 Q / 4 KV heads × 256 dim · GQA 6:1 · 3D MRoPE $[11, 11, 10]$ · $\\sigma$-output gate. Adds ${(kvBytesPerLayer/1e9).toFixed(2)} GB to cache.`}
@@ -802,15 +815,15 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     motifStepCard.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:6px">
         <span style="font-family:var(--display);font-size:15px;font-weight:700;color:var(--fg)">${info.name}</span>
-        <span style="font-family:var(--mono);font-size:11px;color:${stepNum === "4" ? "var(--mint)" : "var(--amber)"};font-weight:600">${info.type}</span>
+        <span style="font-family:var(--mono);font-size:12px;color:${stepNum === "4" ? "var(--mint)" : "var(--amber)"};font-weight:600">${info.type}</span>
       </div>
-      <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line);font-family:var(--mono);font-size:11.5px;color:var(--amber);margin-bottom:8px">
+      <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line);font-family:var(--mono);font-size:12px;color:var(--amber);margin-bottom:8px">
         ${info.state}
       </div>
       <div style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:6px">
         ${info.desc}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);font-family:var(--mono)">
+      <div style="font-size:12px;color:var(--faint);font-family:var(--mono)">
         <b>Motif Advantage:</b> ${info.benefit}
       </div>
     `;
@@ -918,7 +931,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       return `
         <tr class="${isActive ? "active-row" : ""}" data-slot="${rIdx}" tabindex="0" role="button" aria-label="Select Slot ${rIdx}">
           <td style="font-weight:600;color:${isActive ? "var(--amber)" : "var(--fg)"}">
-            <b>k_${rIdx}</b> <span style="font-size:10px;color:var(--faint)">(${slotName})</span>
+            <b>k_${rIdx}</b> <span style="font-size:12px;color:var(--faint)">(${slotName})</span>
           </td>
           ${cells}
         </tr>
@@ -957,7 +970,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
         <div class="delta-matrix-box">
           <div class="delta-box-title">
             <span>Associative Matrix S_t ∈ ℝ^(4×4)</span>
-            <span style="font-size:10px;color:var(--faint)">k_i × v_j (48 heads in §04)</span>
+            <span style="font-size:12px;color:var(--faint)">k_i × v_j (48 heads in §04)</span>
           </div>
           <table class="delta-grid-table">
             <thead>
@@ -978,9 +991,9 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
         <div class="delta-probe-box">
           <div class="delta-box-title">
             <span>Query Probe: y_t = S_t^T q_t</span>
-            <span style="font-size:10px;color:var(--amber)">Probing k_${activeSlot}</span>
+            <span style="font-size:12px;color:var(--amber)">Probing k_${activeSlot}</span>
           </div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">
+          <div style="font-size:12px;color:var(--muted);line-height:1.6">
             <div style="margin-bottom:4px"><b>Retrieved Signal y:</b> <code>[ ${retrievedFormatted} ]</code></div>
             <div style="margin-bottom:6px"><b>Target Expected:</b> <code>[ ${targetFormatted} ]</code></div>
             
@@ -995,7 +1008,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
         </div>
       </div>
 
-      <div style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px;margin-top:10px">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px;margin-top:10px">
         ${writeHistory.length === 0 
           ? "State matrix is zeroed. Choose an update rule, target slot, and feature payload above, or click a <b>Guided Scenario</b>." 
           : `<b>Last Operation:</b> ${writeHistory[writeHistory.length - 1]}`}
@@ -1150,7 +1163,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
           <div class="cs-lbl">Hardware Saturation</div>
         </div>
       </div>
-      <div style="font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-left:3px solid var(--mint);margin-top:8px">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-top:2px solid var(--mint);margin-top:8px">
         ✓ <b>Chunked WY Representation:</b> The sequential product $\\prod_{t=1}^C (I - \\beta_t k_t k_t^T)$ factors into a block-triangular representation $(I - W Y^T)^{-1}$, transforming $\\mathcal{O}(T)$ recurrence into dense parallel GEMMs across $C=${curChunkSize}$ tokens simultaneously.
       </div>
     `;
@@ -1217,7 +1230,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
           <div class="cs-lbl">VRAM Compression</div>
         </div>
       </div>
-      <div style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
         Sequence: <b>${T.toLocaleString()} tokens</b> × Batch <b>${B}</b> @ <b>${bp === 2 ? "BF16" : (bp === 1 ? "FP8" : "FP4")}</b> · 48 DeltaNet layers require <b>0 GB</b> dynamic KV-cache (fixed recurrent matrix).
       </div>
     `;
@@ -1349,7 +1362,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
             <div class="cs-lbl">Retrieval Confidence</div>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11.5px;color:var(--mint);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-left:3px solid var(--mint);margin-top:8px">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--mint);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-top:2px solid var(--mint);margin-top:8px">
           ✓ <b>Relevant Context Ingested:</b> The output sigmoid gate $\sigma(x W_g) \approx 0.94$ passes full attention values into $W_{\text{out}}$, delivering sharp factual retrieval into the residual stream.
         </div>
       `;
@@ -1369,7 +1382,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
             <div class="cs-lbl">Distractor Suppression</div>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11.5px;color:var(--rose);line-height:1.5;background:rgba(138,51,36,0.06);padding:8px 12px;border-radius:6px;border-left:3px solid var(--rose);margin-top:8px">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--rose);line-height:1.5;background:rgba(138,51,36,0.06);padding:8px 12px;border-radius:6px;border-top:2px solid var(--rose);margin-top:8px">
           ✗ <b>Distractor Context Suppressed:</b> When retrieved context contains stale history, the learned gate closes ($\sigma \approx 0.08$), preventing noisy attention logits from polluting downstream DeltaNet states.
         </div>
       `;
@@ -1471,7 +1484,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
         $("ffnOut").innerHTML = `
           <div class="row"><span>x = ${x.toFixed(2)} · SiLU(x) = ${silu(x).toFixed(2)} · SwiGLU Gated Output = <b style="color:var(--iris)">${(silu(x) * x).toFixed(2)}</b></span><span class="v"></span></div>
           <div class="row"><span>ReLU passes ${relu(x) > 0 ? "linear signal" : "zero"} · GELU soft-gates · SiLU preserves smooth negative lobe for gradient stability</span><span class="v"></span></div>
-          <div style="color:var(--faint);font-size:11px;margin-top:4px">Multiplicative gating $(x W_{\\text{gate}}) \\odot \\text{SiLU}(x W_{\\text{up}})$ across 17,408 hidden units acts as key-value memory retrieval for world knowledge.</div>
+          <div style="color:var(--faint);font-size:12px;margin-top:4px">Multiplicative gating $(x W_{\\text{gate}}) \\odot \\text{SiLU}(x W_{\\text{up}})$ across 17,408 hidden units acts as key-value memory retrieval for world knowledge.</div>
         `;
         katexRender($("ffnOut"));
       }
@@ -1637,15 +1650,15 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     visionDetailCard.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:6px">
         <span style="font-family:var(--display);font-size:15px;font-weight:700;color:var(--fg)">${info.name}</span>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--mint);font-weight:600">Stage ${stageNum} / 5</span>
+        <span style="font-family:var(--mono);font-size:12px;color:var(--mint);font-weight:600">Stage ${stageNum} / 5</span>
       </div>
-      <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line);font-family:var(--mono);font-size:11px;color:var(--amber);margin-bottom:8px">
+      <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line);font-family:var(--mono);font-size:12px;color:var(--amber);margin-bottom:8px">
         ${info.tensor}
       </div>
       <div style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:6px">
         ${info.desc}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);font-family:var(--mono)">
+      <div style="font-size:12px;color:var(--faint);font-family:var(--mono)">
         <b>Architectural Key:</b> ${info.insight}
       </div>
     `;
@@ -1716,7 +1729,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
           <div class="cs-lbl">Of 262k Context Budget</div>
         </div>
       </div>
-      <div style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
         Input: <b>${p.name}</b> · Patches: <b>${Math.ceil(p.w/14)} × ${Math.ceil(p.h/14)}</b> per frame × ${p.frames} frame(s) · Compression: <b>${useMerge ? "4× Spatial Merge Active ✓" : "1:1 Raw Patches"}</b>.
       </div>
     `;
@@ -1821,7 +1834,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       <div class="row"><span>Draft Acceptance Rate</span><span class="v m">${accepted}/${proposed} = ${(accepted / Math.max(1, proposed) * 100).toFixed(0)}%</span></div>
       <div class="row"><span>Effective Speedup Multiplier</span><span class="v" style="color:var(--mint);font-size:13px"><b>${speedup}×</b> speedup</span></div>
       <div class="row"><span>Theoretical E[Tokens/Pass] @ β=${beta.toFixed(2)}, K=${K}</span><span class="v i">${effRate.toFixed(2)} tok/pass</span></div>
-      <div style="color:var(--faint);font-size:11px;margin-top:6px;line-height:1.4">
+      <div style="color:var(--faint);font-size:12px;margin-top:6px;line-height:1.4">
         <span style="color:var(--mint)">■ Green</span> = Accepted MTP Drafts · <span style="color:var(--rose)">■ Red</span> = Rejected Tail · <span style="color:var(--amber)">■ Amber</span> = Target Root / Resampled Token
       </div>
     `;
@@ -2345,7 +2358,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
 
     const preset = VERIF_PRESETS[verifPresetIdx % VERIF_PRESETS.length];
     if (mtpVerifPromptText) {
-      mtpVerifPromptText.innerHTML = `<code>${preset.prompt}</code> <span style="font-size:10px;color:var(--faint);margin-left:6px">(${preset.domain})</span>`;
+      mtpVerifPromptText.innerHTML = `<code>${preset.prompt}</code> <span style="font-size:12px;color:var(--faint);margin-left:6px">(${preset.domain})</span>`;
     }
 
     const visibleTokens = preset.tokens.slice(0, depthK + 1);
@@ -2383,11 +2396,11 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     mtpVerifComparison.innerHTML = `
       <div class="verif-cmp-card">
         <div class="cmp-title">Sequential Generation (${totalTokensEvaluated} passes)</div>
-        <div class="cmp-stat">${seqLatencyMs} ms <span style="font-size:10px;color:var(--muted)">(${totalTokensEvaluated} × memory load)</span></div>
+        <div class="cmp-stat">${seqLatencyMs} ms <span style="font-size:12px;color:var(--muted)">(${totalTokensEvaluated} × memory load)</span></div>
       </div>
       <div class="verif-cmp-card">
         <div class="cmp-title">MTP Single-Pass Tree (${acceptedTokensTotal} tokens accepted)</div>
-        <div class="cmp-stat mint">${mtpLatencyMs} ms <span style="font-size:10px;color:var(--mint);font-weight:600">(${speedup}× faster)</span></div>
+        <div class="cmp-stat mint">${mtpLatencyMs} ms <span style="font-size:12px;color:var(--mint);font-weight:600">(${speedup}× faster)</span></div>
       </div>
     `;
   }
@@ -2527,22 +2540,22 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     funnelDetailCard.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:6px">
         <span style="font-family:var(--display);font-size:15px;font-weight:700;color:var(--fg)">${info.name}</span>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--sky);font-weight:600">${info.retention}</span>
+        <span style="font-family:var(--mono);font-size:12px;color:var(--sky);font-weight:600">${info.retention}</span>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px;font-family:var(--mono);font-size:11px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px;font-family:var(--mono);font-size:12px">
         <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line)">
-          <span style="color:var(--faint);text-transform:uppercase;font-size:9.5px;display:block;margin-bottom:2px">Input Volume</span>
+          <span style="color:var(--faint);text-transform:uppercase;font-size:12px;display:block;margin-bottom:2px">Input Volume</span>
           <span style="color:var(--fg);font-weight:600">${info.volIn}</span>
         </div>
         <div style="background:var(--bg-2);padding:8px 12px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line)">
-          <span style="color:var(--faint);text-transform:uppercase;font-size:9.5px;display:block;margin-bottom:2px">Output Shard Yield</span>
+          <span style="color:var(--faint);text-transform:uppercase;font-size:12px;display:block;margin-bottom:2px">Output Shard Yield</span>
           <span style="color:var(--mint);font-weight:600">${info.volOut}</span>
         </div>
       </div>
       <div style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:6px">
         <b>Pipeline Strategy:</b> ${info.details}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);font-family:var(--mono)">
+      <div style="font-size:12px;color:var(--faint);font-family:var(--mono)">
         <b>Filtering Rules:</b> ${info.heuristics}
       </div>
     `;
@@ -2596,14 +2609,13 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     if (!mixStats) return;
     const mix = STAGE_MIXES[stageKey] || STAGE_MIXES.s1;
 
-    if (msbWeb) msbWeb.style.width = `${mix.web}%`;
-    if (msbCode) msbCode.style.width = `${mix.code}%`;
-    if (msbStem) msbStem.style.width = `${mix.stem}%`;
-    if (msbMulti) msbMulti.style.width = `${mix.multi}%`;
+    stackSegments(
+      [[msbWeb, mix.web], [msbCode, mix.code], [msbStem, mix.stem], [msbMulti, mix.multi]]
+    );
 
     mixStats.innerHTML = `
       <div style="font-family:var(--display);font-size:14px;font-weight:700;color:var(--fg);margin-bottom:6px">${mix.name}</div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(130px, 1fr));gap:8px;margin-bottom:8px;font-family:var(--mono);font-size:11px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(130px, 1fr));gap:8px;margin-bottom:8px;font-family:var(--mono);font-size:12px">
         <div style="background:var(--bg-2);padding:6px 10px;border-radius:4px">
           <span style="color:var(--sky)">Web &amp; Books:</span> <b>${mix.web}% (${mix.tokens.web})</b>
         </div>
@@ -2640,7 +2652,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
     if (packingMode === "isolated") {
       packingVisual.innerHTML = `
         <div class="pv-seq-track">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-family:var(--mono);font-size:11px;color:var(--muted)">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-family:var(--mono);font-size:12px;color:var(--muted)">
             <span>Packed 4,096-Token Training Sequence (3 Documents)</span>
             <span style="color:var(--mint);font-weight:600">Fill Rate: 99.8% · 8 Pad Tokens</span>
           </div>
@@ -2673,14 +2685,14 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
             <span class="pv-stat-val" style="color:var(--fg)">Strict Pos 0 Reset at EOS</span>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11.5px;color:var(--mint);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-left:3px solid var(--mint)">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--mint);line-height:1.5;background:rgba(29,110,107,0.06);padding:8px 12px;border-radius:6px;border-top:2px solid var(--mint)">
           ✓ <b>Correct Mask Isolation Active:</b> Attention matrix blocks cross-document attention using FlashAttention varlen paths. Position IDs reset to 0 at each EOS delimiter, preventing positional RoPE contamination across unrelated articles.
         </div>
       `;
     } else {
       packingVisual.innerHTML = `
         <div class="pv-seq-track">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-family:var(--mono);font-size:11px;color:var(--rose)">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-family:var(--mono);font-size:12px;color:var(--rose)">
             <span>Naive Concatenation (Attention Mask Ignored)</span>
             <span style="font-weight:600">Cross-Doc Contamination Bug ✗</span>
           </div>
@@ -2713,7 +2725,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
             <span class="pv-stat-val" style="color:var(--rose)">Spurious Drift Pos 0 → 4,087</span>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11.5px;color:var(--rose);line-height:1.5;background:rgba(138,51,36,0.06);padding:8px 12px;border-radius:6px;border-left:3px solid var(--rose)">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--rose);line-height:1.5;background:rgba(138,51,36,0.06);padding:8px 12px;border-radius:6px;border-top:2px solid var(--rose)">
           ✗ <b>Attention Leakage Bug:</b> Without attention mask resets, Doc 2 and Doc 3 attend directly into previous documents' tokens. Associative memory writes become corrupted with unrelated document history, and RoPE frequencies drift past the document's true length.
         </div>
       `;
@@ -2898,7 +2910,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
         <div class="rf-row"><span>MTP Aux Loss</span><span class="val" style="color:var(--iris)">${getMtpLoss(curTokens).toFixed(3)}</span></div>
       </div>
       <div class="rf-stat-box" style="padding:10px 14px">
-        <div style="font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Milestone Insight</div>
+        <div style="font-family:var(--mono);font-size:12px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Milestone Insight</div>
         <div style="font-size:12px;color:var(--muted);line-height:1.45">
           ${curTokens < 30 
             ? "Phase 1 steadily compresses natural language grammar, factual world knowledge, and broad multilingual representations across 119 languages." 
@@ -2984,7 +2996,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
           <div class="cs-lbl">Energy (PUE 1.25)</div>
         </div>
       </div>
-      <div style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
         Cluster throughput: <b>${(clusterFlopsPerSec / 1e18).toFixed(1)} Sustained ExaFLOPs/s</b> across ${gpuCount.toLocaleString()} × ${gpu.name} @ ${(mfu * 100).toFixed(0)}% MFU · Power Draw: <b>${clusterMw.toFixed(2)} MW</b>.
       </div>
     `;
@@ -3352,7 +3364,7 @@ const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
       <div class="row"><span>Deliberation Thinking Tokens Allocated</span><span class="v i">${curToks.toLocaleString()} tokens</span></div>
       <div class="row"><span>Agent Multi-Turn Self-Correction Probability (preserve_thinking=${preserve})</span><span class="v a">${recoveryRate.toFixed(1)}%</span></div>
       <div class="row"><span>Marginal Accuracy Left on Table vs xhigh</span><span class="v" style="color:var(--faint)">${(getAcc(3, diff) - curAcc).toFixed(1)} pts</span></div>
-      <div style="color:var(--faint);font-size:11.5px;margin-top:8px;line-height:1.45">
+      <div style="color:var(--faint);font-size:12px;margin-top:8px;line-height:1.45">
         ${effort === 0 
           ? "Direct instant mode active: Zero latency overhead, best for chat & simple retrieval." 
           : `Thinking mode active: Subgoal decomposition allocates ~${curToks.toLocaleString()} tokens of test-time compute.`}
@@ -3515,10 +3527,12 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
 
     // Update stacked visual memory bar
     const maxBar = Math.max(budget, totalGB);
-    if (vsbWeights) vsbWeights.style.width = `${(weightsGB / maxBar) * 100}%`;
-    if (vsbKv) vsbKv.style.width = `${(kvGB / maxBar) * 100}%`;
-    if (vsbDeltanet) vsbDeltanet.style.width = `${Math.max(1.5, (dnStateGB / maxBar) * 100)}%`;
-    if (vsbOverhead) vsbOverhead.style.width = `${(overheadGB / maxBar) * 100}%`;
+    stackSegments([
+      [vsbWeights, (weightsGB / maxBar) * 100],
+      [vsbKv, (kvGB / maxBar) * 100],
+      [vsbDeltanet, Math.max(1.5, (dnStateGB / maxBar) * 100)],
+      [vsbOverhead, (overheadGB / maxBar) * 100],
+    ]);
 
     if (vramTotalLabel) {
       vramTotalLabel.innerHTML = `<span style="color:${fits ? "var(--mint)" : "var(--rose)"}">${totalGB.toFixed(2)} GB</span> / ${budget} GB`;
@@ -3547,7 +3561,7 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
           ${totalGB.toFixed(2)} GB ${fits ? `· Fits comfortably (${(budget - totalGB).toFixed(1)} GB headroom ✓)` : `· Over budget by ${(totalGB - budget).toFixed(1)} GB ✗`}
         </span>
       </div>
-      <div style="color:var(--faint);font-size:11.5px;margin-top:8px;line-height:1.45">
+      <div style="color:var(--faint);font-size:12px;margin-top:8px;line-height:1.45">
         ${fits 
           ? "✓ Configuration verified. High throughput serving ready with zero out-of-memory hazard." 
           : "⚠️ Remedy overflow: (1) Switch KV Cache dtype from BF16 to FP8/NVFP4, (2) Step down weights precision to NVFP4, or (3) Lower concurrency."}
@@ -3728,7 +3742,7 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
       </div>
 
       <div class="rf-stat-box" style="padding:10px 14px">
-        <div style="font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Roofline Takeaway</div>
+        <div style="font-family:var(--mono);font-size:12px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Roofline Takeaway</div>
         <div style="font-size:12px;color:var(--muted);line-height:1.45">
           Single-stream generation operates firmly inside the <b>memory-bandwidth-bound slope</b> (${decodeIntensity.toFixed(1)} vs ${kneePoint.toFixed(0)} FLOP/B knee). MTP speculative draft heads multiply effective speed by <b>${mtpSpeedup(mtpBeta, 2).toFixed(2)}×</b> (§08 acceptance model, β=${mtpBeta.toFixed(2)}, γ_verify=0.15) without increasing weight memory traffic.
         </div>
@@ -3787,7 +3801,7 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
             <div class="sched-chunk decode" style="flex:1">Dec</div>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11px;color:var(--mint);margin-top:6px;display:flex;justify-content:space-between">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--mint);margin-top:6px;display:flex;justify-content:space-between">
           <span>✓ Zero Pipeline Bubbles · Tensor Core Utilization: <b>84%</b></span>
           <span>Max Inter-Token Jitter: <b>&lt;18 ms</b></span>
         </div>
@@ -3819,7 +3833,7 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
             <div class="sched-chunk decode" style="flex:1">Dec</div>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:11px;color:var(--rose);margin-top:6px;display:flex;justify-content:space-between">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--rose);margin-top:6px;display:flex;justify-content:space-between">
           <span>✗ Severe Latency Bubble · Tensor Core Utilization: <b>31%</b></span>
           <span>Inter-Token Latency Spike: <b>3,800 ms</b></span>
         </div>
@@ -4154,7 +4168,7 @@ Let's modify the test to use an event-driven 'wait_for_condition(timeout=2.0)'.`
       </div>
 
       <div class="tracer-stat-box" style="padding:10px 14px">
-        <div style="font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Key Tensor Insight</div>
+        <div style="font-family:var(--mono);font-size:12px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Key Tensor Insight</div>
         <div style="font-size:12px;color:var(--muted);line-height:1.45">
           ${mod === "deltanet" 
             ? "DeltaNet's associative matrix <code>S</code> remains strictly constant in size (<b>" + formatBytes(stats.stateMemory) + "</b>) regardless of whether sequence length T is 1 or 262,144 tokens."
