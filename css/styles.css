@@ -16,7 +16,7 @@
   --line-strong:rgba(26,22,18,0.24);
   --fg:#1a1612;         /* iron-gall ink — body text, deep warm black */
   --muted:#5a5046;      /* faded sepia — secondary text */
-  --faint:#6f6455;      /* ledger pencil — tertiary, marginalia */
+  --faint:#615748;      /* ledger pencil — tertiary, marginalia. Darkened from #6f6455 so it clears WCAG AA (4.5:1) on --bg-3, the code-well paper; it was 3.74:1 there. */
   --ink-2:#2e2820;      /* body paragraph ink — softer than --fg */
   --ink-3:#3a3328;      /* table body ink — softer still */
   --amber:#b8341f;      /* cinnabar red — primary accent (was amber; re-themed to lead pigment) */
@@ -708,12 +708,14 @@ td .num,th.r,td.r{text-align:right;font-variant-numeric:tabular-nums;}
 .seg button{
   background:none;border:none;color:var(--muted);cursor:pointer;
   font-family:var(--mono);font-size:12px;padding:6px 13px;border-radius:7px;transition:all .15s;}
-/* small modifier for a control sitting inside a toolbar or a grid head */
+/* small modifier for a control sitting inside a toolbar or a grid head.
+   Shrinks padding only: the page holds a 12px floor on all UI text, so
+   "small" means a tighter control, never a smaller type size. */
 .seg.sm{padding:2px;}
-.seg.sm button{font-size:11.5px;padding:4px 9px;}
+.seg.sm button{padding:4px 9px;}
 .w-btn.ghost{background:transparent;color:var(--muted);box-shadow:0 0 0 1px var(--line);}
 .w-btn.ghost:hover{color:var(--fg);box-shadow:0 0 0 1px var(--line-strong);}
-.w-btn.sm{font-size:11.5px;padding:5px 11px;}
+.w-btn.sm{padding:5px 11px;}
 .seg button.on{background:rgba(184,52,31,0.16);color:var(--amber-deep);box-shadow:inset 0 0 0 1px rgba(184,52,31,0.35);}
 .seg button:focus-visible,.mchip:focus-visible,.dchip:focus-visible,.w-btn:focus-visible,.code-tab:focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg-0),0 0 0 4px var(--amber);}
 
