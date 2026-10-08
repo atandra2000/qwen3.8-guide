@@ -11,3 +11,6 @@ AUDIT-*.md
 # Python bytecode
 __pycache__/
 *.pyc
+
+# codegraph index (binary, local only)
+.codegraph/
